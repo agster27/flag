@@ -10,6 +10,7 @@ This project automates the daily playback of "Colors" at 8:00 AM and "Taps" at s
 - Skips restore if Sonos speaker was idle
 - Logs all playback events to `/opt/sonos_play.log`
 - Serves audio files over local HTTP
+- All variables (Sonos IP, volume, MP3 URLs) are configurable via `config.json`
 
 ## System Requirements
 
@@ -18,6 +19,24 @@ This project automates the daily playback of "Colors" at 8:00 AM and "Taps" at s
 - Debian/Ubuntu VM or LXC (Proxmox-compatible)
 - Python virtual environment
 - `colors.mp3` and `taps.mp3` stored in `/opt/audio/`
+
+## Dependencies
+
+Install system-level dependencies:
+
+```bash
+sudo apt update
+sudo apt install python3-full python3-venv ffmpeg jq -y
+```
+
+Create Python virtual environment and install packages:
+
+```bash
+cd /opt
+python3 -m venv sonos-env
+source sonos-env/bin/activate
+pip install soco astral pytz mutagen
+```
 
 ## Project Structure
 
@@ -28,32 +47,13 @@ This project automates the daily playback of "Colors" at 8:00 AM and "Taps" at s
 ├── schedule_sonos.sh      # Updates daily cron job for sunset
 ├── sonos_play.log         # Log file (auto-created)
 ├── sonos-env/             # Python virtual environment
+├── config.json            # User configuration (IP, volume, URLs)
 └── audio/
     ├── colors.mp3         # 8:00 AM scheduled song
     └── taps.mp3           # Sunset scheduled song
 ```
 
-## Setup Instructions
-
-### 1. Install Python and set up virtual environment
-
-```bash
-sudo apt update
-sudo apt install python3-full python3-venv ffmpeg -y
-cd /opt
-python3 -m venv sonos-env
-source sonos-env/bin/activate
-pip install soco astral pytz mutagen
-```
-
-### 2. Place MP3 files
-
-```bash
-mkdir -p /opt/audio
-cp colors.mp3 taps.mp3 /opt/audio/
-```
-
-### 3. Serve MP3s via HTTP
+## Serve MP3s via HTTP
 
 This makes your audio files accessible to Sonos:
 
@@ -61,7 +61,9 @@ This makes your audio files accessible to Sonos:
 python3 -m http.server 8000 --directory /opt --bind 0.0.0.0
 ```
 
-To run this automatically at boot:
+### Auto-start HTTP on boot (optional)
+
+Create a service file:
 
 ```bash
 sudo nano /etc/systemd/system/audio-server.service
@@ -90,6 +92,21 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now audio-server
 ```
 
+## Configure with config.json
+
+Create or edit `/opt/config.json`:
+
+```json
+{
+  "sonos_ip": "192.168.1.50",
+  "volume": 30,
+  "colors_url": "http://flag.aghy.home:8000/audio/colors.mp3",
+  "taps_url": "http://flag.aghy.home:8000/audio/taps.mp3",
+  "default_wait_seconds": 60,
+  "skip_restore_if_idle": true
+}
+```
+
 ## Cron Setup
 
 Edit the root crontab:
@@ -108,7 +125,7 @@ Add:
 0 2 * * * /opt/schedule_sonos.sh
 ```
 
-`schedule_sonos.sh` will calculate the sunset time and create a one-time cron job each day to play `taps.mp3`.
+`schedule_sonos.sh` will use `config.json` and dynamically create the proper `taps.mp3` schedule based on sunset.
 
 ## Testing
 
@@ -124,7 +141,7 @@ Check logs:
 tail -n 10 /opt/sonos_play.log
 ```
 
-Expected log output if something was playing before:
+Expected output if something was playing before:
 
 ```
 INFO: Took snapshot of Living Room (was_playing=True)
@@ -141,13 +158,6 @@ SUCCESS: Played http://flag.aghy.home:8000/audio/taps.mp3 on Living Room
 INFO: Waiting 42 seconds for playback to finish
 INFO: No prior playback. Skipping restore.
 ```
-
-## Notes
-
-- Update `SONOS_IP` in `sonos_play.py` to match your speaker's IP
-- Mutagen automatically determines MP3 duration
-- Only restores playback if the speaker was playing before interruption
-- Crontab is dynamically updated daily to match sunset time
 
 ## License
 
