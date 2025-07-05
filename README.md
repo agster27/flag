@@ -1,100 +1,92 @@
-# Sonos Scheduled Playback: Colors & Taps Automation
+# 🇺🇸 Sonos Ceremonial Playback: Colors & Taps
 
-This project automates the daily playback of "Colors" at 8:00 AM and "Taps" at sunset using a Sonos speaker system and a virtual server or container.
+🎖️ **Honor tradition with tech** — This project plays the bugle calls **Colors** at 8:00 AM and **Taps** at sunset on a Sonos speaker automatically every day.
 
-## Features
+---
 
-- Play `colors.mp3` daily at 8:00 AM
-- Play `taps.mp3` daily at sunset (automatically calculated)
-- Pauses current playback and restores original audio after scheduled track
-- Skips restore if Sonos speaker was idle
-- Logs all playback events to `/opt/sonos_play.log`
-- Serves audio files over local HTTP
-- All variables (Sonos IP, volume, MP3 URLs) are configurable via `config.json`
+## 🌟 Features
 
-## System Requirements
+✅ Play `colors.mp3` at **0800 sharp** every morning  
+🌅 Dynamically calculate **sunset time** to play `taps.mp3`  
+🔇 Pause what's playing and **restore** it after the call  
+📄 Log every playback to `/opt/sonos_play.log`  
+📡 Serve your MP3s via a **tiny HTTP server**  
+⚙️ Customize everything via `config.json`  
 
-- Python 3.8+
-- Sonos speaker (reachable on the same subnet)
-- Debian/Ubuntu VM or LXC (Proxmox-compatible)
-- Python virtual environment
-- `colors.mp3` and `taps.mp3` stored in `/opt/audio/`
+---
 
-## Dependencies
+## 🧰 Requirements
 
-Install system-level dependencies:
+- 🐍 Python 3.8+
+- 📶 Sonos speaker on the local network
+- 🖥️ Ubuntu/Debian VM or LXC container (Proxmox-ready)
+- 🎧 Your own `colors.mp3` and `taps.mp3` in `/opt/audio/`
+
+---
+
+## 🚀 Easy Setup
+
+Just run:
+
+```bash
+wget https://raw.githubusercontent.com/agster27/flag/main/setup.sh -O setup.sh
+chmod +x setup.sh
+./setup.sh
+```
+
+This will:
+
+- Install all dependencies
+- Set up your virtual environment
+- Clone this GitHub repo into `/opt`
+- Copy over the Python scripts
+- Set up a sample `config.json`
+
+---
+
+## 🔧 Manual Setup (if you're hardcore)
 
 ```bash
 sudo apt update
-sudo apt install python3-full python3-venv ffmpeg jq -y
-```
-
-Create Python virtual environment and install packages:
-
-```bash
+sudo apt install python3-full python3-venv ffmpeg jq git -y
 cd /opt
 python3 -m venv sonos-env
 source sonos-env/bin/activate
 pip install soco astral pytz mutagen
 ```
 
-## Project Structure
+---
+
+## 🗂️ Project Layout
 
 ```
 /opt/
-├── sonos_play.py          # Main playback handler
-├── sunset_timer.py        # Calculates today's sunset time
-├── schedule_sonos.sh      # Updates daily cron job for sunset
-├── sonos_play.log         # Log file (auto-created)
-├── sonos-env/             # Python virtual environment
-├── config.json            # User configuration (IP, volume, URLs)
+├── sonos_play.py          # Plays the MP3
+├── sunset_timer.py        # Calculates sunset
+├── schedule_sonos.sh      # Adds dynamic sunset cron
+├── sonos_play.log         # 🎯 Log file
+├── config.json            # 🔧 Settings
+├── sonos-env/             # 🐍 Virtual environment
 └── audio/
-    ├── colors.mp3         # 8:00 AM scheduled song
-    └── taps.mp3           # Sunset scheduled song
+    ├── colors.mp3         # 🎶 Morning bugle call
+    └── taps.mp3           # 🌅 Evening taps
 ```
 
-## Serve MP3s via HTTP
+---
 
-This makes your audio files accessible to Sonos:
+## 📡 MP3 Hosting
 
 ```bash
 python3 -m http.server 8000 --directory /opt --bind 0.0.0.0
 ```
 
-### Auto-start HTTP on boot (optional)
+💡 Tip: Set it to auto-start with a `systemd` service!
 
-Create a service file:
+---
 
-```bash
-sudo nano /etc/systemd/system/audio-server.service
-```
+## 📝 Config
 
-Paste:
-
-```
-[Unit]
-Description=Audio HTTP Server
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/python3 -m http.server 8000 --directory /opt --bind 0.0.0.0
-WorkingDirectory=/opt
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now audio-server
-```
-
-## Configure with config.json
-
-Create or edit `/opt/config.json`:
+Edit `/opt/config.json` to match your Sonos and preferences:
 
 ```json
 {
@@ -107,63 +99,53 @@ Create or edit `/opt/config.json`:
 }
 ```
 
-## Cron Setup
+---
 
-Edit the root crontab:
+## ⏰ Cron Setup
+
+Edit the crontab with:
 
 ```bash
 sudo crontab -e
 ```
 
-Add:
+Add these jobs:
 
-```
-# Play Colors at 8 AM
+```cron
+# Colors at 8:00 AM
 0 8 * * * /opt/sonos-env/bin/python /opt/sonos_play.py http://flag.aghy.home:8000/audio/colors.mp3
 
-# Update sunset schedule daily at 2 AM
+# Sunset schedule update at 2:00 AM
 0 2 * * * /opt/schedule_sonos.sh
 ```
 
-`schedule_sonos.sh` will use `config.json` and dynamically create the proper `taps.mp3` schedule based on sunset.
+---
 
-## Testing
+## 🧪 Testing
 
-To manually test playback:
+Run manually:
 
 ```bash
 /opt/sonos-env/bin/python /opt/sonos_play.py http://flag.aghy.home:8000/audio/colors.mp3
 ```
 
-Check logs:
+Check the log:
 
 ```bash
 tail -n 10 /opt/sonos_play.log
 ```
 
-Expected output if something was playing before:
+---
 
-```
-INFO: Took snapshot of Living Room (was_playing=True)
-SUCCESS: Played http://flag.aghy.home:8000/audio/colors.mp3 on Living Room
-INFO: Waiting 52 seconds for playback to finish
-INFO: Restored previous playback on Living Room
-```
+## 📜 License
 
-If idle before:
+MIT — use freely for civic, personal, or ceremonial purposes.
 
-```
-INFO: Took snapshot of Living Room (was_playing=False)
-SUCCESS: Played http://flag.aghy.home:8000/audio/taps.mp3 on Living Room
-INFO: Waiting 42 seconds for playback to finish
-INFO: No prior playback. Skipping restore.
-```
+---
 
-## License
+## ✍️ Author
 
-MIT — use freely for personal, civic, or ceremonial purposes.
+🫡 Created by  
+Agster — Marine, civic leader, and builder of better systems.
 
-## Author
-
-Michael Aghajanian  
 GitHub: [@agster27](https://github.com/agster27)
