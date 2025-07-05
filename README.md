@@ -34,12 +34,19 @@ Powered by:
 ---
 
 ## 📁 Project Structure
+
+```
 /opt/
-├── sonos_play.py # Main playback handler
-├── sunset_timer.py # Calculates today's sunset time
-├── schedule_sonos.sh # Updates daily cron job for sunset
-├── sonos_play.log # Log file (auto-created)
-├── sonos-env/ # Python virtual environment
+├── sonos_play.py          # Main playback handler
+├── sunset_timer.py        # Calculates today's sunset time
+├── schedule_sonos.sh      # Updates daily cron job for sunset
+├── sonos_play.log         # Log file (auto-created)
+├── sonos-env/             # Python virtual environment
+└── audio/
+    ├── colors.mp3         # 8:00 AM scheduled song
+    └── taps.mp3           # Sunset scheduled song
+```
+
 
 
 ---
