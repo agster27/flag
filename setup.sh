@@ -28,7 +28,6 @@ function prompt_menu() {
 function uninstall_all() {
     log "🚨 Uninstalling Honor Tradition with Tech..."
     sudo rm -rf "$INSTALL_DIR"
-    # Remove related crontab entries
     TMPCRON=$(mktemp)
     crontab -l 2>/dev/null | grep -v "$INSTALL_DIR" > "$TMPCRON" || true
     crontab "$TMPCRON" || true
@@ -40,12 +39,10 @@ function uninstall_all() {
 function update_or_install() {
     log "🔧 Setting up Sonos Scheduled Playback Environment..."
 
-    # Step 1: Install system dependencies
     log "📦 Installing dependencies..."
     sudo apt update | tee -a "$LOG_FILE"
     sudo apt install -y python3-full python3-venv ffmpeg jq wget | tee -a "$LOG_FILE"
 
-    # Step 2: Create directory structure
     log "📁 Creating $AUDIO_DIR..."
     sudo mkdir -p "$AUDIO_DIR"
     sudo chown $(whoami) "$AUDIO_DIR"
@@ -53,7 +50,6 @@ function update_or_install() {
     sudo chown $(whoami) "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 
-    # Step 3: Download list of all files in the repo
     log "🌐 Fetching file list from GitHub API..."
     FILES=$(wget -qO- https://api.github.com/repos/agster27/flag/contents/ | jq -r '.[] | select(.type == "file") | .name')
     if [ -z "$FILES" ]; then
@@ -61,7 +57,6 @@ function update_or_install() {
         exit 1
     fi
 
-    # Step 4: Download each file if it exists in the repo
     log "⬇️  Downloading scripts from GitHub..."
     for file in $FILES; do
         if wget -q "$BASE_URL/$file" -O "$file"; then
@@ -71,11 +66,9 @@ function update_or_install() {
         fi
     done
 
-    # Make all .sh and .py scripts executable if any
     log "🔐 Making .sh and .py scripts executable..."
     find "$INSTALL_DIR" -maxdepth 1 -type f \( -iname "*.sh" -o -iname "*.py" \) -exec chmod +x {} \;
 
-    # Step 5: Setup Python virtual environment
     log "🐍 Setting up virtual environment..."
     python3 -m venv "$VENV_DIR"
     source "$VENV_DIR/bin/activate"
@@ -84,7 +77,6 @@ function update_or_install() {
     pip install --upgrade pip | tee -a "$LOG_FILE"
     pip install soco astral pytz mutagen | tee -a "$LOG_FILE"
 
-    # Step 6: Create config.json if not present
     CONFIG_FILE="$INSTALL_DIR/config.json"
     if [ ! -f "$CONFIG_FILE" ]; then
         log "📝 Creating default config.json..."
@@ -102,7 +94,6 @@ EOF
         log "✅ config.json already exists. Skipping creation."
     fi
 
-    # Step 7: Add 8 AM Colors cronjob if it doesn't exist
     CRON_CMD="$VENV_DIR/bin/python $INSTALL_DIR/sonos_play.py \$(jq -r .colors_url $CONFIG_FILE)"
     CRON_JOB="0 8 * * * $CRON_CMD"
     log "📅 Checking crontab for 8 AM Colors job..."
@@ -113,34 +104,32 @@ EOF
         log "✅ Colors cronjob already exists."
     fi
 
-    # Step 8: Add 2 AM schedule_sonos.sh cronjob if not present
-    SCHEDULE_CMD="$INSTALL_DIR/schedule_sonos.sh"
+    # Use schedule_sonos.py instead of .sh
+    SCHEDULE_CMD="$VENV_DIR/bin/python $INSTALL_DIR/schedule_sonos.py"
     SCHEDULE_JOB="0 2 * * * $SCHEDULE_CMD"
-    log "📅 Checking crontab for 2 AM schedule_sonos.sh job..."
+    log "📅 Checking crontab for 2 AM schedule_sonos.py job..."
     if ! crontab -l 2>/dev/null | grep -Fq "$SCHEDULE_CMD"; then
         (crontab -l 2>/dev/null; echo "$SCHEDULE_JOB") | crontab -
-        log "✅ Added schedule_sonos.sh cronjob: $SCHEDULE_JOB"
+        log "✅ Added schedule_sonos.py cronjob: $SCHEDULE_JOB"
     else
-        log "✅ schedule_sonos.sh cronjob already exists."
+        log "✅ schedule_sonos.py cronjob already exists."
     fi
 
-    # Step 9: Run schedule_sonos.sh to update sunset cron
-    if [ -x "$SCHEDULE_CMD" ]; then
-        log "🚀 Running schedule_sonos.sh to update sunset cron job..."
-        "$SCHEDULE_CMD" | tee -a "$LOG_FILE"
-        log "✅ schedule_sonos.sh executed."
+    # Run it now
+    if [ -x "$INSTALL_DIR/schedule_sonos.py" ]; then
+        log "🚀 Running schedule_sonos.py to update sunset cron job..."
+        $SCHEDULE_CMD | tee -a "$LOG_FILE"
+        log "✅ schedule_sonos.py executed."
     else
-        log "⚠️  schedule_sonos.sh not found or not executable!"
+        log "⚠️  schedule_sonos.py not found or not executable!"
     fi
 
-    # Step 10: Notify user about next steps
     log "✅ Setup complete. See $LOG_FILE for details."
     log "Make sure to:"
     log "- Upload your colors.mp3 and taps.mp3 files to $AUDIO_DIR"
     log "- Your cron jobs are set up. To review, run: crontab -l"
 }
 
-# --- MAIN MENU ---
 while true; do
     prompt_menu
     case $CHOICE in
