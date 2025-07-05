@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-SETUP_VERSION="1.2.1"
+SETUP_VERSION="1.2.2"
 
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"
@@ -140,7 +140,12 @@ EOF
     log "🔄 Restarting audio HTTP server..."
     sudo systemctl restart flag-audio-http
 
-    # Informational output
+    # NEW: Run schedule_sonos.py to set up crontab
+    log "🗓️  Running schedule_sonos.py to set up Sonos schedule crontab..."
+    source "$VENV_DIR/bin/activate"
+    "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
+    deactivate
+
     log "🏁 Setup complete."
     log ""
     log "Test your setup:"
