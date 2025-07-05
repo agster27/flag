@@ -27,12 +27,13 @@ function prompt_menu() {
 
 function uninstall_all() {
     log "🚨 Uninstalling Honor Tradition with Tech..."
-    sudo rm -rf "$INSTALL_DIR"
+    # Remove related crontab entries
     TMPCRON=$(mktemp)
     crontab -l 2>/dev/null | grep -v "$INSTALL_DIR" > "$TMPCRON" || true
     crontab "$TMPCRON" || true
     rm -f "$TMPCRON"
     log "✅ All files and cron jobs removed!"
+    sudo rm -rf "$INSTALL_DIR"
     exit 0
 }
 
