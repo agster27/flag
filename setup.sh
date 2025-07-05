@@ -1,13 +1,14 @@
 #!/bin/bash
 set -e
 
-SETUP_VERSION="1.2.0"
+SETUP_VERSION="1.2.1"
 
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"
 AUDIO_DIR="$INSTALL_DIR/audio"
 VENV_DIR="$INSTALL_DIR/sonos-env"
 LOG_FILE="$INSTALL_DIR/setup.log"
+REQUIREMENTS_TXT="$INSTALL_DIR/requirements.txt"
 
 sudo mkdir -p "$INSTALL_DIR"
 sudo chown $(whoami) "$INSTALL_DIR"
@@ -85,6 +86,21 @@ function update_or_install() {
         fi
     done
 
+    # Make all .py scripts in /opt/flag executable
+    log "🔑 Setting execute permissions on Python scripts..."
+    find "$INSTALL_DIR" -maxdepth 1 -type f -name "*.py" -exec chmod +x {} \;
+
+    # Create requirements.txt if not present
+    if [ ! -f "$REQUIREMENTS_TXT" ]; then
+        log "📝 Creating requirements.txt..."
+        cat > "$REQUIREMENTS_TXT" <<EOF
+soco
+mutagen
+astral
+pytz
+EOF
+    fi
+
     # Create virtual environment if it doesn't exist
     if [ ! -d "$VENV_DIR" ]; then
         log "🐍 Creating Python virtual environment..."
@@ -94,7 +110,7 @@ function update_or_install() {
     log "📦 Installing/updating Python dependencies in virtualenv..."
     source "$VENV_DIR/bin/activate"
     pip install --upgrade pip
-    pip install -r requirements.txt
+    pip install -r "$REQUIREMENTS_TXT"
     deactivate
 
     log "✅ Python dependencies installed."
