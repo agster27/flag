@@ -84,7 +84,7 @@ This project automates the daily playback of "Colors" at 8:00 AM and "Taps" at s
 
     Add:
     ```cron
-    0 8 * * * /opt/sonos-env/bin/python /opt/sonos_play.py http://flag.aghy.home:8000/colors.mp3
+    0 8 * * * /opt/sonos-env/bin/python /opt/sonos_play.py http://flag.aghy.home:8000/audio/colors.mp3
     0 2 * * * /opt/schedule_sonos.sh
     ```
 
@@ -95,7 +95,7 @@ This project automates the daily playback of "Colors" at 8:00 AM and "Taps" at s
 - Play something on Sonos manually
 - Run this to test:
     ```bash
-    /opt/sonos-env/bin/python /opt/sonos_play.py http://flag.aghy.home:8000/colors.mp3
+    /opt/sonos-env/bin/python /opt/sonos_play.py http://flag.aghy.home:8000/audio/colors.mp3
     ```
 
 - Log file:
