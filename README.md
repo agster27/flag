@@ -24,45 +24,20 @@
 
 ---
 
-## 🚀 Easy Setup (No Git Required)
+## 🚀 Easy Setup
 
-**Run the following from any directory (e.g. `/root` or `/opt`):**
+**Download and run the setup script from any directory (e.g., `/root` or `/opt`):**
 
 ```bash
-sudo apt update
-sudo apt install -y python3-full python3-venv ffmpeg jq wget
-
-sudo mkdir -p /opt/flag/audio
-sudo chown $(whoami) /opt/flag/audio
-cd /opt/flag
-
-BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
-wget -q $BASE_URL/sonos_play.py -O sonos_play.py
-wget -q $BASE_URL/sunset_timer.py -O sunset_timer.py
-wget -q $BASE_URL/schedule_sonos.sh -O schedule_sonos.sh
-wget -q $BASE_URL/audio_check.py -O audio_check.py
-
-chmod +x schedule_sonos.sh
-
-python3 -m venv sonos-env
-source sonos-env/bin/activate
-pip install --upgrade pip
-pip install soco astral pytz mutagen
-
-# Create config.json if it doesn't exist
-if [ ! -f config.json ]; then
-cat <<EOF > config.json
-{
-  "sonos_ip": "192.168.1.50",
-  "volume": 30,
-  "colors_url": "http://flag.aghy.home:8000/audio/colors.mp3",
-  "taps_url": "http://flag.aghy.home:8000/audio/taps.mp3",
-  "default_wait_seconds": 60,
-  "skip_restore_if_idle": true
-}
-EOF
-fi
+wget https://raw.githubusercontent.com/agster27/flag/main/setup.sh -O setup.sh
+chmod +x setup.sh
+./setup.sh
 ```
+
+**You will be prompted with:**
+1. Update/install the latest scripts (recommended for first install or upgrades)
+2. Uninstall completely (removes all files and cron jobs)
+3. Exit without doing anything
 
 ---
 
@@ -113,13 +88,14 @@ Edit `/opt/flag/config.json` to match your Sonos and preferences:
 
 ## ⏰ Cron Setup
 
-Edit the crontab with:
+The setup script will attempt to automatically add a cron job for Colors at 8:00 AM.
+To manually check or add jobs, run:
 
 ```bash
 crontab -e
 ```
 
-Add these jobs:
+Add these jobs if not present:
 
 ```cron
 # Colors at 8:00 AM
