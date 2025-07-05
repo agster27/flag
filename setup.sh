@@ -31,6 +31,9 @@ function uninstall_all() {
     crontab "$TMPCRON" || true
     rm -f "$TMPCRON"
     log "✅ All files and cron jobs removed!"
+    sudo systemctl disable --now flag-audio-http 2>/dev/null || true
+    sudo rm -f /etc/systemd/system/flag-audio-http.service
+    sudo systemctl daemon-reload
     sudo rm -rf "$INSTALL_DIR"
     exit 0
 }
@@ -103,10 +106,37 @@ EOF
         log "⚠️  schedule_sonos.py not found or not executable!"
     fi
 
+    # --- Setup Audio HTTP server as a systemd service ---
+    SERVICE_FILE="/etc/systemd/system/flag-audio-http.service"
+    log "📝 Creating systemd service at $SERVICE_FILE..."
+
+    sudo tee "$SERVICE_FILE" > /dev/null <<EOF
+[Unit]
+Description=Flag Audio HTTP Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$VENV_DIR/bin/python -m http.server 8000 --directory $AUDIO_DIR
+WorkingDirectory=$AUDIO_DIR
+Restart=always
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    log "🔄 Reloading systemd daemon and enabling audio HTTP server..."
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now flag-audio-http
+    log "✅ Audio HTTP server started and enabled! Files served at http://<your-host>:8000/"
+
     log "✅ Setup complete. See $LOG_FILE for details."
     log "Make sure to:"
     log "- Upload your colors.mp3 and taps.mp3 files to $AUDIO_DIR"
     log "- Your cron jobs are set up. To review, run: crontab -l"
+    log "- Audio server is running. Check with: sudo systemctl status flag-audio-http"
 }
 
 while true; do
