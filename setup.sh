@@ -63,3 +63,17 @@ echo "✅ Setup complete. Make sure to:"
 echo "- Add the cron jobs listed in the README.md"
 echo "- Upload your colors.mp3 and taps.mp3 files to /opt/audio"
 echo "- Run /opt/schedule_sonos.sh after 2AM to create the sunset cron job"
+
+# Step 7: Set permissions on schedule_sonos.sh
+chmod 755 /opt/schedule_sonos.sh
+
+# Step 8: Add 8 AM Colors cronjob if it doesn't exist
+CRON_CMD="/opt/sonos-env/bin/python /opt/sonos_play.py $(jq -r .colors_url /opt/config.json)"
+CRON_JOB="0 8 * * * $CRON_CMD"
+echo "📅 Checking crontab for 8 AM Colors job..."
+if ! crontab -l 2>/dev/null | grep -Fq "$CRON_CMD"; then
+    (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
+    echo "✅ Added Colors cronjob: $CRON_JOB"
+else
+    echo "✅ Colors cronjob already exists."
+fi
