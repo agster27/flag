@@ -1,27 +1,32 @@
 #!/bin/bash
 
-LOG_FILE="/opt/sonos_play.log"
-SONOS_ENV="/opt/sonos-env/bin/python"
-PLAY_SCRIPT="/opt/sonos_play.py"
-AUDIO_URL="http://flag.aghy.home:8000/taps.mp3"
+CONFIG_FILE="/opt/config.json"
+PYTHON_BIN="/opt/sonos-env/bin/python"
+SONOS_PLAY="/opt/sonos_play.py"
+SUNSET_TIMER="/opt/sunset_timer.py"
+CRON_TEMP="/tmp/cron_sunset"
+CURRENT_CRON=$(mktemp)
 
-log() {
-    echo "$(date --iso-8601=seconds) - $1" >> "$LOG_FILE"
-}
+# Extract taps_url from config.json
+TAPS_URL=$(jq -r '.taps_url' "$CONFIG_FILE")
 
-# Get today's sunset time
-SUNSET_TIME=$($SONOS_ENV /opt/sunset_timer.py)
-SUNSET_HOUR=$(date -d "$SUNSET_TIME" '+%H')
-SUNSET_MIN=$(date -d "$SUNSET_TIME" '+%M')
+# Get sunset time
+SUNSET_TIME=$($PYTHON_BIN $SUNSET_TIMER)
 
-# Remove any existing crontab lines that call sonos_play.py with taps.mp3
-crontab -l | grep -v "$AUDIO_URL" > /tmp/current_cron
+# Format HH:MM
+SUNSET_HOUR=$(echo "$SUNSET_TIME" | cut -d: -f1)
+SUNSET_MIN=$(echo "$SUNSET_TIME" | cut -d: -f2)
 
-# Add the updated sunset job
-echo "$SUNSET_MIN $SUNSET_HOUR * * * $SONOS_ENV $PLAY_SCRIPT $AUDIO_URL" >> /tmp/current_cron
+# Log
+echo "$(date --iso-8601=seconds) - INFO: Calculated sunset time: $SUNSET_TIME for taps.mp3" >> /opt/sonos_play.log
 
-# Install the updated crontab
-crontab /tmp/current_cron
-rm /tmp/current_cron
+# Prepare cron line
+CRON_CMD="$SUNSET_MIN $SUNSET_HOUR * * * $PYTHON_BIN $SONOS_PLAY $TAPS_URL"
 
-log "INFO: Sunset schedule updated to $SUNSET_HOUR:$SUNSET_MIN for taps.mp3"
+# Remove existing line for sonos_play.py from crontab and add new one
+crontab -l 2>/dev/null | grep -v "$SONOS_PLAY" > "$CURRENT_CRON"
+echo "$CRON_CMD" >> "$CURRENT_CRON"
+crontab "$CURRENT_CRON"
+rm "$CURRENT_CRON"
+
+echo "$(date --iso-8601=seconds) - INFO: Sunset schedule updated to $SUNSET_TIME for taps.mp3" >> /opt/sonos_play.log
