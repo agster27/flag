@@ -29,7 +29,7 @@
 **Download and run the setup script from any directory (e.g., `/root` or `/opt`):**
 
 ```bash
-wget https://raw.githubusercontent.com/agster27/flag/main/setup.sh -O setup.sh
+wget --no-cache https://raw.githubusercontent.com/agster27/flag/main/setup.sh -O setup.sh
 chmod +x setup.sh
 ./setup.sh
 ```
