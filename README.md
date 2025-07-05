@@ -24,37 +24,44 @@
 
 ---
 
-## 🚀 Easy Setup
+## 🚀 Easy Setup (No Git Required)
 
-**Run setup.sh from a directory OUTSIDE `/opt/flag` (for example, `/root` or `/opt`):**
-
-```bash
-cd /opt
-wget https://raw.githubusercontent.com/agster27/flag/main/setup.sh -O setup.sh
-chmod +x setup.sh
-./setup.sh
-```
-
-This will:
-
-- Install all dependencies
-- Set up your virtual environment
-- Clone this GitHub repo into `/opt/flag`
-- Copy over the Python scripts
-- Set up a sample `/opt/flag/config.json`
-- Always force your local copy to match GitHub (any local changes in `/opt/flag` will be lost)
-
----
-
-## 🔧 Manual Setup (if you're hardcore)
+**Run the following from any directory (e.g. `/root` or `/opt`):**
 
 ```bash
 sudo apt update
-sudo apt install python3-full python3-venv ffmpeg jq git -y
+sudo apt install -y python3-full python3-venv ffmpeg jq wget
+
+sudo mkdir -p /opt/flag/audio
+sudo chown $(whoami) /opt/flag/audio
 cd /opt/flag
+
+BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
+wget -q $BASE_URL/sonos_play.py -O sonos_play.py
+wget -q $BASE_URL/sunset_timer.py -O sunset_timer.py
+wget -q $BASE_URL/schedule_sonos.sh -O schedule_sonos.sh
+wget -q $BASE_URL/audio_check.py -O audio_check.py
+
+chmod +x schedule_sonos.sh
+
 python3 -m venv sonos-env
 source sonos-env/bin/activate
+pip install --upgrade pip
 pip install soco astral pytz mutagen
+
+# Create config.json if it doesn't exist
+if [ ! -f config.json ]; then
+cat <<EOF > config.json
+{
+  "sonos_ip": "192.168.1.50",
+  "volume": 30,
+  "colors_url": "http://flag.aghy.home:8000/audio/colors.mp3",
+  "taps_url": "http://flag.aghy.home:8000/audio/taps.mp3",
+  "default_wait_seconds": 60,
+  "skip_restore_if_idle": true
+}
+EOF
+fi
 ```
 
 ---
@@ -66,6 +73,7 @@ pip install soco astral pytz mutagen
 ├── sonos_play.py          # Plays the MP3
 ├── sunset_timer.py        # Calculates sunset
 ├── schedule_sonos.sh      # Adds dynamic sunset cron
+├── audio_check.py         # Audio check script
 ├── sonos_play.log         # 🎯 Log file
 ├── config.json            # 🔧 Settings
 ├── sonos-env/             # 🐍 Virtual environment
@@ -108,7 +116,7 @@ Edit `/opt/flag/config.json` to match your Sonos and preferences:
 Edit the crontab with:
 
 ```bash
-sudo crontab -e
+crontab -e
 ```
 
 Add these jobs:
