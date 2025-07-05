@@ -1,20 +1,22 @@
-from astral.sun import sun
-from astral import LocationInfo
+#!/usr/bin/env python3
+
 from datetime import datetime
+from astral import LocationInfo
+from astral.sun import sun
 import pytz
+import json
 
-LOG_FILE = "/opt/sonos_play.log"
+# Load config
+with open("/opt/config.json") as f:
+    config = json.load(f)
 
-def log(message):
-    with open(LOG_FILE, "a") as f:
-        f.write(f"{datetime.now().isoformat()} - {message}\n")
+latitude = config.get("latitude", 42.1)
+longitude = config.get("longitude", -71.5)
+timezone = config.get("timezone", "America/New_York")
 
-try:
-    city = LocationInfo("Milford", "USA", "US/Eastern", 42.1398, -71.5162)
-    s = sun(city.observer, date=datetime.now().date(), tzinfo=pytz.timezone(city.timezone))
-    sunset_time = s['sunset'].strftime('%H:%M')
-    log(f"INFO: Calculated sunset time: {sunset_time}")
-    print(sunset_time)
-except Exception as e:
-    log(f"ERROR: Failed to calculate sunset time - {e}")
-    print("18:00")  # fallback sunset time
+city = LocationInfo("Custom", "Home", timezone, latitude, longitude)
+s = sun(city.observer, date=datetime.now(pytz.timezone(timezone)), tzinfo=pytz.timezone(timezone))
+sunset = s["sunset"]
+
+# Output crontab-compatible time: minute hour
+print(f"{sunset.minute} {sunset.hour}")
