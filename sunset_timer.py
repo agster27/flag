@@ -7,7 +7,7 @@ import pytz
 import json
 
 # Load config
-with open("/opt/config.json") as f:
+with open("/opt/flag/config.json") as f:
     config = json.load(f)
 
 latitude = config.get("latitude", 42.1)
