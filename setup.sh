@@ -9,12 +9,25 @@ echo "📦 Installing dependencies..."
 sudo apt update
 sudo apt install -y python3-full python3-venv ffmpeg jq git
 
-# Step 2: Create audio directory if it doesn't exist
+# Step 2: Clone or update the repository, always force to GitHub's latest version (discard local changes)
+echo "📥 Cloning or updating GitHub repository..."
+if [ -d "/opt/flag/.git" ]; then
+    cd /opt/flag
+    git fetch origin
+    git checkout main || git checkout -b main origin/main
+    git reset --hard origin/main
+else
+    sudo rm -rf /opt/flag  # Remove any non-git directory
+    git clone https://github.com/agster27/flag.git /opt/flag
+    cd /opt/flag
+fi
+
+# Step 3: Create audio directory if it doesn't exist
 echo "📁 Ensuring /opt/flag/audio exists..."
 sudo mkdir -p /opt/flag/audio
 sudo chown $(whoami) /opt/flag/audio
 
-# Step 3: Setup Python virtual environment
+# Step 4: Setup Python virtual environment
 echo "🐍 Setting up virtual environment..."
 cd /opt/flag
 python3 -m venv sonos-env
@@ -23,23 +36,6 @@ source sonos-env/bin/activate
 echo "📦 Installing Python packages..."
 pip install --upgrade pip
 pip install soco astral pytz mutagen
-
-# Step 4: Clone GitHub repo or hard reset to latest main
-echo "📥 Cloning or updating GitHub repository..."
-cd /opt
-if [ -d "/opt/flag/.git" ]; then
-    cd /opt/flag
-    git fetch origin
-    git checkout main || git checkout -b main origin/main
-    git reset --hard origin/main
-else
-    git clone https://github.com/agster27/flag.git /opt/flag
-    cd /opt/flag
-fi
-
-echo "📄 Copying scripts to /opt/flag..."
-cp sonos_play.py sunset_timer.py schedule_sonos.sh audio_check.py /opt/flag/
-chmod +x /opt/flag/schedule_sonos.sh
 
 # Step 5: Create default config.json if not present
 CONFIG_FILE="/opt/flag/config.json"
