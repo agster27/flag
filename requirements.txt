@@ -1,4 +1,5 @@
 astral
-requests
-pysonos
 soco
+requests
+pytz
+tzlocal
