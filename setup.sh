@@ -43,17 +43,24 @@ function update_or_install() {
     sudo chown $(whoami) "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 
-    # Step 3: Download all scripts from GitHub (add any new files here as needed)
+    # Step 3: Download list of all files in the repo
+    echo "🌐 Fetching file list from GitHub API..."
+    FILES=$(wget -qO- https://api.github.com/repos/agster27/flag/contents/ | jq -r '.[] | select(.type == "file") | .name')
+    if [ -z "$FILES" ]; then
+        echo "❌ Could not fetch file list from GitHub. Exiting."
+        exit 1
+    fi
+
+    # Step 4: Download each file if it exists in the repo
     echo "⬇️  Downloading scripts from GitHub..."
-    FILES="sonos_play.py sunset_timer.py schedule_sonos.sh audio_check.py README.md LICENSE requirements.txt"
     for file in $FILES; do
-        wget -q "$BASE_URL/$file" -O "$file" || echo "WARNING: $file could not be downloaded!"
+        wget -q "$BASE_URL/$file" -O "$file" && echo "Downloaded: $file"
     done
 
-    # Make all .sh scripts executable
+    # Make all .sh scripts executable if any
     chmod +x *.sh 2>/dev/null || true
 
-    # Step 4: Setup Python virtual environment
+    # Step 5: Setup Python virtual environment
     echo "🐍 Setting up virtual environment..."
     python3 -m venv "$VENV_DIR"
     source "$VENV_DIR/bin/activate"
@@ -62,7 +69,7 @@ function update_or_install() {
     pip install --upgrade pip
     pip install soco astral pytz mutagen
 
-    # Step 5: Create config.json if not present
+    # Step 6: Create config.json if not present
     CONFIG_FILE="$INSTALL_DIR/config.json"
     if [ ! -f "$CONFIG_FILE" ]; then
         echo "📝 Creating default config.json..."
@@ -80,13 +87,13 @@ EOF
         echo "✅ config.json already exists. Skipping creation."
     fi
 
-    # Step 6: Notify user about next steps
+    # Step 7: Notify user about next steps
     echo "✅ Setup complete. Make sure to:"
     echo "- Add the cron jobs listed in the README.md"
     echo "- Upload your colors.mp3 and taps.mp3 files to $AUDIO_DIR"
     echo "- Run $INSTALL_DIR/schedule_sonos.sh after 2AM to create the sunset cron job"
 
-    # Step 7: Add 8 AM Colors cronjob if it doesn't exist
+    # Step 8: Add 8 AM Colors cronjob if it doesn't exist
     CRON_CMD="$VENV_DIR/bin/python $INSTALL_DIR/sonos_play.py \$(jq -r .colors_url $CONFIG_FILE)"
     CRON_JOB="0 8 * * * $CRON_CMD"
     echo "📅 Checking crontab for 8 AM Colors job..."
