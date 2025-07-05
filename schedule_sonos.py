@@ -1,10 +1,10 @@
 #!/bin/bash
 
-CONFIG_FILE="/opt/config.json"
-SONOS_ENV="/opt/sonos-env/bin/python"
-SONOS_SCRIPT="/opt/sonos_play.py"
-SUNSET_TIMER="/opt/sunset_timer.py"
-LOG_FILE="/opt/sonos_play.log"
+CONFIG_FILE="/opt/flag/config.json"
+SONOS_ENV="/opt/flag/sonos-env/bin/python"
+SONOS_SCRIPT="/opt/flag/sonos_play.py"
+SUNSET_TIMER="/opt/flag/sunset_timer.py"
+LOG_FILE="/opt/flag/sonos_play.log"
 
 # Extract URLs from config
 TAPS_URL=$(jq -r .taps_url "$CONFIG_FILE")
@@ -21,7 +21,6 @@ fi
 # Build cron entries
 TAPS_CMD="$SONOS_ENV $SONOS_SCRIPT $TAPS_URL"
 TAPS_JOB="$SUNSET_TIME * * * $TAPS_CMD"
-
 COLORS_CMD="$SONOS_ENV $SONOS_SCRIPT $COLORS_URL"
 COLORS_JOB="0 8 * * * $COLORS_CMD"
 
