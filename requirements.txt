@@ -1,3 +1,4 @@
 astral
 requests
 pysonos
+soco
