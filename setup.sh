@@ -30,6 +30,8 @@ cd /opt
 if [ -d "/opt/flag" ]; then
     echo "🔁 Repo already exists, pulling latest changes..."
     cd /opt/flag
+    git checkout main 2>/dev/null || git checkout -b main
+    git branch --set-upstream-to=origin/main main 2>/dev/null
     git pull
 else
     git clone https://github.com/agster27/flag.git /opt/flag
