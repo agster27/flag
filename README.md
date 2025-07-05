@@ -39,9 +39,13 @@ chmod +x setup.sh
 2. Uninstall completely (removes all files and cron jobs)
 3. Exit without doing anything
 
+> The script will automatically download all required files from GitHub, create a Python virtual environment, install dependencies, and generate a default `config.json` if needed.
+
 ---
 
 ## 🗂️ Project Layout
+
+After setup, your `/opt/flag/` folder should look like:
 
 ```
 /opt/flag/
@@ -49,12 +53,15 @@ chmod +x setup.sh
 ├── sunset_timer.py        # Calculates sunset
 ├── schedule_sonos.sh      # Adds dynamic sunset cron
 ├── audio_check.py         # Audio check script
-├── sonos_play.log         # 🎯 Log file
-├── config.json            # 🔧 Settings
+├── README.md              # Project readme (downloaded for reference)
+├── LICENSE                # Project license (downloaded for reference)
+├── requirements.txt       # Python requirements (downloaded for reference)
+├── sonos_play.log         # 🎯 Log file (created at runtime)
+├── config.json            # 🔧 Settings (auto-generated if missing)
 ├── sonos-env/             # 🐍 Virtual environment
 └── audio/
-    ├── colors.mp3         # 🎶 Morning bugle call
-    └── taps.mp3           # 🌅 Evening taps
+    ├── colors.mp3         # 🎶 Morning bugle call (add your own)
+    └── taps.mp3           # 🌅 Evening taps (add your own)
 ```
 
 ---
@@ -99,7 +106,7 @@ Add these jobs if not present:
 
 ```cron
 # Colors at 8:00 AM
-0 8 * * * /opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://flag.aghy.home:8000/audio/colors.mp3
+0 8 * * * /opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py $(jq -r .colors_url /opt/flag/config.json)
 
 # Sunset schedule update at 2:00 AM
 0 2 * * * /opt/flag/schedule_sonos.sh
