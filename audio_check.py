@@ -6,7 +6,7 @@ import sys
 from mutagen.mp3 import MP3
 from mutagen import MutagenError
 
-AUDIO_DIR = "/opt/audio"
+AUDIO_DIR = "/opt/flag/audio"
 VALID_SAMPLE_RATES = [44100, 48000]
 VALID_CHANNELS = 2
 VALID_EXTENSION = ".mp3"
@@ -38,7 +38,7 @@ def convert_to_mp3(filepath):
         return False
 
 def check_all_audio():
-    print("🎧 Checking MP3 files in /opt/audio...")
+    print("🎧 Checking MP3 files in /opt/flag/audio...")
     for filename in os.listdir(AUDIO_DIR):
         if filename.endswith(VALID_EXTENSION):
             filepath = os.path.join(AUDIO_DIR, filename)
