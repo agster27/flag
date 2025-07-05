@@ -9,10 +9,10 @@ SUNSET_TIMER="/opt/sunset_timer.py"
 # Extract taps_url from config
 TAPS_URL=$(jq -r .taps_url "$CONFIG_FILE")
 
-# Get sunset hour and minute from Python script
-SUNSET_TIME=$(/usr/bin/python3 "$SUNSET_TIMER")  # Expected format: "20 24" (8:24 PM)
+# Use virtualenv Python to run sunset_timer
+SUNSET_TIME=$("$SONOS_ENV" "$SUNSET_TIMER")  # Expected format: "20 24"
 
-# Validate that it's in correct format
+# Validate format
 if ! [[ "$SUNSET_TIME" =~ ^[0-9]{1,2}\ [0-9]{1,2}$ ]]; then
   echo "❌ Invalid time format received from sunset_timer.py: '$SUNSET_TIME'"
   exit 1
@@ -22,7 +22,7 @@ fi
 CRON_CMD="$SONOS_ENV $SONOS_SCRIPT $TAPS_URL"
 CRON_JOB="$SUNSET_TIME * * * $CRON_CMD"
 
-# Check and remove existing taps cron entry
+# Clean up previous taps cron entries and apply updated one
 echo "🧹 Cleaning up old Taps cron jobs..."
 (crontab -l 2>/dev/null | grep -v "$SONOS_SCRIPT.*taps.mp3"; echo "$CRON_JOB") | crontab -
 
