@@ -30,6 +30,7 @@ Just run:
 
 ```bash
 wget https://raw.githubusercontent.com/agster27/flag/main/setup.sh -O setup.sh
+chmod 755 setup.sh
 chmod +x setup.sh
 ./setup.sh
 ```
@@ -143,7 +144,9 @@ MIT — use freely for civic, personal, or ceremonial purposes.
 
 ---
 
-## 🫡 Created by  
-Agster — Marine, civic leader, and builder of better systems.
+## ✍️ Author
+
+🫡 Created by  
+Michael Aghajanian — Marine, civic leader, and builder of better systems.
 
 GitHub: [@agster27](https://github.com/agster27)
