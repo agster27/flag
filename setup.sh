@@ -10,13 +10,13 @@ sudo apt update
 sudo apt install -y python3-full python3-venv ffmpeg jq git
 
 # Step 2: Create audio directory if it doesn't exist
-echo "📁 Ensuring /opt/audio exists..."
-sudo mkdir -p /opt/audio
-sudo chown $(whoami) /opt/audio
+echo "📁 Ensuring /opt/flag/audio exists..."
+sudo mkdir -p /opt/flag/audio
+sudo chown $(whoami) /opt/flag/audio
 
 # Step 3: Setup Python virtual environment
 echo "🐍 Setting up virtual environment..."
-cd /opt
+cd /opt/flag
 python3 -m venv sonos-env
 source sonos-env/bin/activate
 
@@ -32,16 +32,16 @@ if [ -d "/opt/flag" ]; then
     cd /opt/flag
     git pull
 else
-    git clone https://github.com/agster27/flag.git
-    cd flag
+    git clone https://github.com/agster27/flag.git /opt/flag
+    cd /opt/flag
 fi
 
-echo "📄 Copying scripts to /opt..."
-cp sonos_play.py sunset_timer.py schedule_sonos.sh /opt/
-chmod +x /opt/schedule_sonos.sh
+echo "📄 Copying scripts to /opt/flag..."
+cp sonos_play.py sunset_timer.py schedule_sonos.sh audio_check.py /opt/flag/
+chmod +x /opt/flag/schedule_sonos.sh
 
 # Step 5: Create default config.json if not present
-CONFIG_FILE="/opt/config.json"
+CONFIG_FILE="/opt/flag/config.json"
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "📝 Creating default config.json..."
     cat <<EOF > "$CONFIG_FILE"
@@ -61,14 +61,14 @@ fi
 # Step 6: Notify user about next steps
 echo "✅ Setup complete. Make sure to:"
 echo "- Add the cron jobs listed in the README.md"
-echo "- Upload your colors.mp3 and taps.mp3 files to /opt/audio"
-echo "- Run /opt/schedule_sonos.sh after 2AM to create the sunset cron job"
+echo "- Upload your colors.mp3 and taps.mp3 files to /opt/flag/audio"
+echo "- Run /opt/flag/schedule_sonos.sh after 2AM to create the sunset cron job"
 
 # Step 7: Set permissions on schedule_sonos.sh
-chmod 755 /opt/schedule_sonos.sh
+chmod 755 /opt/flag/schedule_sonos.sh
 
 # Step 8: Add 8 AM Colors cronjob if it doesn't exist
-CRON_CMD="/opt/sonos-env/bin/python /opt/sonos_play.py $(jq -r .colors_url /opt/config.json)"
+CRON_CMD="/opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py \$(jq -r .colors_url /opt/flag/config.json)"
 CRON_JOB="0 8 * * * $CRON_CMD"
 echo "📅 Checking crontab for 8 AM Colors job..."
 if ! crontab -l 2>/dev/null | grep -Fq "$CRON_CMD"; then
