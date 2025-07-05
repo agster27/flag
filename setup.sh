@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+SETUP_VERSION="1.1.0"
+
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"
 AUDIO_DIR="$INSTALL_DIR/audio"
@@ -39,6 +41,7 @@ function uninstall_all() {
 }
 
 function update_or_install() {
+    log "🚀 Running setup.sh version $SETUP_VERSION"
     log "🔧 Setting up Sonos Scheduled Playback Environment..."
 
     log "📦 Installing dependencies..."
