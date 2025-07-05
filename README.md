@@ -1,6 +1,6 @@
-# Honor tradition with tech
+# 🇺🇸 Flag Sonos Scheduler
 
-🎖️ **Honor tradition with tech** — This project plays the bugle calls **Colors** at 8:00 AM and **Taps** at sunset on a Sonos speaker automatically every day.
+A robust, self-hosted system to automatically play "colors.mp3" and "taps.mp3" on your Sonos speaker at scheduled times (e.g., morning and sunset).
 
 ---
 
@@ -10,7 +10,7 @@
 🌅 Dynamically calculate **sunset time** to play `taps.mp3`  
 🔇 Pause what's playing and **restore** it after the call  
 📄 Log every playback to `/opt/flag/sonos_play.log`  
-📡 Serve your MP3s via a **tiny HTTP server**  
+📡 Serve your MP3s via a **tiny HTTP server** (systemd-managed)  
 ⚙️ Customize everything via `/opt/flag/config.json`  
 
 ---
@@ -24,55 +24,44 @@
 
 ---
 
-## 🚀 Easy Setup
+## 🚀 Installation
 
-**Download and run the setup script from any directory (e.g., `/root` or `/opt`):**
+Clone the repo and run the setup script:
 
 ```bash
-wget https://raw.githubusercontent.com/agster27/flag/main/setup.sh -O setup.sh
+git clone https://github.com/agster27/flag.git /opt/flag
+cd /opt/flag
 chmod +x setup.sh
 ./setup.sh
 ```
 
-**You will be prompted with:**
-1. Update/install the latest scripts (recommended for first install or upgrades)
-2. Uninstall completely (removes all files and cron jobs)
-3. Exit without doing anything
-
-> The script will automatically download all required files from GitHub, create a Python virtual environment, install dependencies, and generate a default `config.json` if needed.
-
----
-
-## 🗂️ Project Layout
-
-After setup, your `/opt/flag/` folder should look like:
-
-```
-/opt/flag/
-├── sonos_play.py          # Plays the MP3
-├── sunset_timer.py        # Calculates sunset
-├── schedule_sonos.sh      # Adds dynamic sunset cron
-├── audio_check.py         # Audio check script
-├── README.md              # Project readme (downloaded for reference)
-├── LICENSE                # Project license (downloaded for reference)
-├── requirements.txt       # Python requirements (downloaded for reference)
-├── sonos_play.log         # 🎯 Log file (created at runtime)
-├── config.json            # 🔧 Settings (auto-generated if missing)
-├── sonos-env/             # 🐍 Virtual environment
-└── audio/
-    ├── colors.mp3         # 🎶 Morning bugle call (add your own)
-    └── taps.mp3           # 🌅 Evening taps (add your own)
-```
+- This will:
+  - Download required files and audio.
+  - Set up a Python virtual environment with dependencies.
+  - Configure a systemd service to serve your audio files.
+  - Set up scheduled Sonos playback (via cron).
 
 ---
 
 ## 📡 MP3 Hosting
 
-```bash
-python3 -m http.server 8000 --directory /opt/flag --bind 0.0.0.0
-```
+**Audio files are automatically served via a systemd-managed Python HTTP server.**
 
-💡 Tip: Set it to auto-start with a `systemd` service!
+You do **not** need to manually run `python3 -m http.server`—the systemd service handles this for you.
+
+The server is configured to serve files from `/opt/flag/audio` at [http://flag.aghy.home:8000/](http://flag.aghy.home:8000/).
+
+To play or download audio directly, use:
+
+- [http://flag.aghy.home:8000/colors.mp3](http://flag.aghy.home:8000/colors.mp3)
+- [http://flag.aghy.home:8000/taps.mp3](http://flag.aghy.home:8000/taps.mp3)
+
+If you need to check the server status or restart it, use:
+
+```bash
+sudo systemctl status flag-audio-http
+sudo systemctl restart flag-audio-http
+```
 
 ---
 
@@ -84,61 +73,52 @@ Edit `/opt/flag/config.json` to match your Sonos and preferences:
 {
   "sonos_ip": "192.168.1.50",
   "volume": 30,
-  "colors_url": "http://flag.aghy.home:8000/audio/colors.mp3",
-  "taps_url": "http://flag.aghy.home:8000/audio/taps.mp3",
+  "colors_url": "http://flag.aghy.home:8000/colors.mp3",
+  "taps_url": "http://flag.aghy.home:8000/taps.mp3",
   "default_wait_seconds": 60,
-  "skip_restore_if_idle": true
+  "skip_restore_if_idle": true,
+  "latitude": 42.1,
+  "longitude": -71.5,
+  "timezone": "America/New_York"
 }
 ```
 
 ---
 
-## ⏰ Cron Setup
+## 🔄 Updating Audio
 
-The setup script will attempt to automatically add a cron job for Colors at 8:00 AM.
-To manually check or add jobs, run:
-
-```bash
-crontab -e
-```
-
-Add these jobs if not present:
-
-```cron
-# Colors at 8:00 AM
-0 8 * * * /opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py $(jq -r .colors_url /opt/flag/config.json)
-
-# Sunset schedule update at 2:00 AM
-0 2 * * * /opt/flag/schedule_sonos.sh
-```
+To update your audio files, simply replace the MP3s in `/opt/flag/audio/`.  
+The HTTP server and Sonos scripts will automatically use the new files.
 
 ---
 
-## 🧪 Testing
+## 🔔 Scheduling Details
 
-Run manually:
-
-```bash
-/opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://flag.aghy.home:8000/audio/colors.mp3
-```
-
-Check the log:
-
-```bash
-tail -n 10 /opt/flag/sonos_play.log
-```
+- `colors.mp3` is played at 08:00 every day.
+- `taps.mp3` is played at **sunset** (calculated for your configured location).
+- Cron jobs are managed automatically.
+- All playback and errors are logged to `/opt/flag/sonos_play.log`.
 
 ---
 
-## 📜 License
+## 🛠️ Troubleshooting
 
-MIT — use freely for civic, personal, or ceremonial purposes.
+- **Check audio server:**  
+  `sudo systemctl status flag-audio-http`
+- **Check logs:**  
+  `cat /opt/flag/sonos_play.log`
+- **Check crontab:**  
+  `crontab -l`
+- **Test playback manually:**  
+  ```bash
+  /opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://flag.aghy.home:8000/colors.mp3
+  ```
 
 ---
 
-## ✍️ Author
+## 🙏 Credits
 
-🫡 Created by  
-Michael Aghajanian — Marine, civic leader, and builder of better systems.
+Created by agster27.  
+Inspired by tradition, powered by Python and Sonos.
 
-GitHub: [@agster27](https://github.com/agster27)
+---
