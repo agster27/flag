@@ -7,7 +7,6 @@ AUDIO_DIR="$INSTALL_DIR/audio"
 VENV_DIR="$INSTALL_DIR/sonos-env"
 LOG_FILE="$INSTALL_DIR/setup.log"
 
-# Ensure /opt/flag exists before any logging
 sudo mkdir -p "$INSTALL_DIR"
 sudo chown $(whoami) "$INSTALL_DIR"
 touch "$LOG_FILE"
@@ -27,7 +26,6 @@ function prompt_menu() {
 
 function uninstall_all() {
     log "🚨 Uninstalling Honor Tradition with Tech..."
-    # Remove related crontab entries
     TMPCRON=$(mktemp)
     crontab -l 2>/dev/null | grep -v "$INSTALL_DIR" > "$TMPCRON" || true
     crontab "$TMPCRON" || true
@@ -95,30 +93,10 @@ EOF
         log "✅ config.json already exists. Skipping creation."
     fi
 
-    CRON_CMD="$VENV_DIR/bin/python $INSTALL_DIR/sonos_play.py \$(jq -r .colors_url $CONFIG_FILE)"
-    CRON_JOB="0 8 * * * $CRON_CMD"
-    log "📅 Checking crontab for 8 AM Colors job..."
-    if ! crontab -l 2>/dev/null | grep -Fq "$CRON_CMD"; then
-        (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
-        log "✅ Added Colors cronjob: $CRON_JOB"
-    else
-        log "✅ Colors cronjob already exists."
-    fi
-
-    # Use schedule_sonos.py instead of .sh
+    # Step: Call schedule_sonos.py to update crontab
     SCHEDULE_CMD="$VENV_DIR/bin/python $INSTALL_DIR/schedule_sonos.py"
-    SCHEDULE_JOB="0 2 * * * $SCHEDULE_CMD"
-    log "📅 Checking crontab for 2 AM schedule_sonos.py job..."
-    if ! crontab -l 2>/dev/null | grep -Fq "$SCHEDULE_CMD"; then
-        (crontab -l 2>/dev/null; echo "$SCHEDULE_JOB") | crontab -
-        log "✅ Added schedule_sonos.py cronjob: $SCHEDULE_JOB"
-    else
-        log "✅ schedule_sonos.py cronjob already exists."
-    fi
-
-    # Run it now
     if [ -x "$INSTALL_DIR/schedule_sonos.py" ]; then
-        log "🚀 Running schedule_sonos.py to update sunset cron job..."
+        log "🚀 Running schedule_sonos.py to update crontab..."
         $SCHEDULE_CMD | tee -a "$LOG_FILE"
         log "✅ schedule_sonos.py executed."
     else
