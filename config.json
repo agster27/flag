@@ -1,8 +1,9 @@
 {
-  "sonos_ip": "10.0.40.86",
-  "volume": 30,
-  "colors_url": "http://flag.aghy.home:8000/audio/colors.mp3",
-  "taps_url": "http://flag.aghy.home:8000/audio/taps.mp3",
-  "default_wait_seconds": 60,
-  "skip_restore_if_idle": true
+    "volume": 30,
+    "default_wait_seconds": 5,
+    "colors_url": "http://flag.aghy.home:8000/audio/colors.mp3",
+    "taps_url": "http://flag.aghy.home:8000/audio/taps.mp3",
+    "latitude": 42.1,
+    "longitude": -71.5,
+    "timezone": "America/New_York"
 }
