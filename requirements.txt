@@ -1,5 +1,4 @@
 astral
 soco
-requests
+mutagen
 pytz
-tzlocal
