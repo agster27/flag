@@ -1,5 +1,4 @@
 #!/bin/bash
-
 set -e
 
 echo "🔧 Setting up Sonos Scheduled Playback Environment..."
@@ -7,29 +6,27 @@ echo "🔧 Setting up Sonos Scheduled Playback Environment..."
 # Step 1: Install system dependencies
 echo "📦 Installing dependencies..."
 sudo apt update
-sudo apt install -y python3-full python3-venv ffmpeg jq git
+sudo apt install -y python3-full python3-venv ffmpeg jq
 
-# Step 2: Clone or update the repository, always force to GitHub's latest version (discard local changes)
-echo "📥 Cloning or updating GitHub repository..."
-if [ -d "/opt/flag/.git" ]; then
-    cd /opt/flag
-    git fetch origin
-    git checkout main || git checkout -b main origin/main
-    git reset --hard origin/main
-else
-    sudo rm -rf /opt/flag  # Remove any non-git directory
-    git clone https://github.com/agster27/flag.git /opt/flag
-    cd /opt/flag
-fi
-
-# Step 3: Create audio directory if it doesn't exist
-echo "📁 Ensuring /opt/flag/audio exists..."
+# Step 2: Create /opt/flag directory structure
+echo "📁 Creating /opt/flag/audio..."
 sudo mkdir -p /opt/flag/audio
 sudo chown $(whoami) /opt/flag/audio
 
+# Step 3: Download scripts from GitHub
+echo "⬇️  Downloading scripts from GitHub..."
+BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
+cd /opt/flag
+
+wget -q $BASE_URL/sonos_play.py -O sonos_play.py
+wget -q $BASE_URL/sunset_timer.py -O sunset_timer.py
+wget -q $BASE_URL/schedule_sonos.sh -O schedule_sonos.sh
+wget -q $BASE_URL/audio_check.py -O audio_check.py
+
+chmod +x schedule_sonos.sh
+
 # Step 4: Setup Python virtual environment
 echo "🐍 Setting up virtual environment..."
-cd /opt/flag
 python3 -m venv sonos-env
 source sonos-env/bin/activate
 
@@ -37,7 +34,7 @@ echo "📦 Installing Python packages..."
 pip install --upgrade pip
 pip install soco astral pytz mutagen
 
-# Step 5: Create default config.json if not present
+# Step 5: Create config.json if not present
 CONFIG_FILE="/opt/flag/config.json"
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "📝 Creating default config.json..."
@@ -55,22 +52,4 @@ else
     echo "✅ config.json already exists. Skipping creation."
 fi
 
-# Step 6: Notify user about next steps
-echo "✅ Setup complete. Make sure to:"
-echo "- Add the cron jobs listed in the README.md"
-echo "- Upload your colors.mp3 and taps.mp3 files to /opt/flag/audio"
-echo "- Run /opt/flag/schedule_sonos.sh after 2AM to create the sunset cron job"
-
-# Step 7: Set permissions on schedule_sonos.sh
-chmod 755 /opt/flag/schedule_sonos.sh
-
-# Step 8: Add 8 AM Colors cronjob if it doesn't exist
-CRON_CMD="/opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py \$(jq -r .colors_url /opt/flag/config.json)"
-CRON_JOB="0 8 * * * $CRON_CMD"
-echo "📅 Checking crontab for 8 AM Colors job..."
-if ! crontab -l 2>/dev/null | grep -Fq "$CRON_CMD"; then
-    (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
-    echo "✅ Added Colors cronjob: $CRON_JOB"
-else
-    echo "✅ Colors cronjob already exists."
-fi
+echo "✅ Setup complete. See README for next steps."
