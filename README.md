@@ -1,4 +1,4 @@
-# 🇺🇸 Sonos Ceremonial Playback: Colors & Taps
+# Honor tradition with tech
 
 🎖️ **Honor tradition with tech** — This project plays the bugle calls **Colors** at 8:00 AM and **Taps** at sunset on a Sonos speaker automatically every day.
 
@@ -9,9 +9,9 @@
 ✅ Play `colors.mp3` at **0800 sharp** every morning  
 🌅 Dynamically calculate **sunset time** to play `taps.mp3`  
 🔇 Pause what's playing and **restore** it after the call  
-📄 Log every playback to `/opt/sonos_play.log`  
+📄 Log every playback to `/opt/flag/sonos_play.log`  
 📡 Serve your MP3s via a **tiny HTTP server**  
-⚙️ Customize everything via `config.json`  
+⚙️ Customize everything via `/opt/flag/config.json`  
 
 ---
 
@@ -20,17 +20,17 @@
 - 🐍 Python 3.8+
 - 📶 Sonos speaker on the local network
 - 🖥️ Ubuntu/Debian VM or LXC container (Proxmox-ready)
-- 🎧 Your own `colors.mp3` and `taps.mp3` in `/opt/audio/`
+- 🎧 Your own `colors.mp3` and `taps.mp3` in `/opt/flag/audio/`
 
 ---
 
 ## 🚀 Easy Setup
 
-Just run:
+**Run setup.sh from a directory OUTSIDE `/opt/flag` (for example, `/root` or `/opt`):**
 
 ```bash
+cd /opt
 wget https://raw.githubusercontent.com/agster27/flag/main/setup.sh -O setup.sh
-chmod 755 setup.sh
 chmod +x setup.sh
 ./setup.sh
 ```
@@ -39,9 +39,10 @@ This will:
 
 - Install all dependencies
 - Set up your virtual environment
-- Clone this GitHub repo into `/opt`
+- Clone this GitHub repo into `/opt/flag`
 - Copy over the Python scripts
-- Set up a sample `config.json`
+- Set up a sample `/opt/flag/config.json`
+- Always force your local copy to match GitHub (any local changes in `/opt/flag` will be lost)
 
 ---
 
@@ -50,7 +51,7 @@ This will:
 ```bash
 sudo apt update
 sudo apt install python3-full python3-venv ffmpeg jq git -y
-cd /opt
+cd /opt/flag
 python3 -m venv sonos-env
 source sonos-env/bin/activate
 pip install soco astral pytz mutagen
@@ -61,7 +62,7 @@ pip install soco astral pytz mutagen
 ## 🗂️ Project Layout
 
 ```
-/opt/
+/opt/flag/
 ├── sonos_play.py          # Plays the MP3
 ├── sunset_timer.py        # Calculates sunset
 ├── schedule_sonos.sh      # Adds dynamic sunset cron
@@ -78,7 +79,7 @@ pip install soco astral pytz mutagen
 ## 📡 MP3 Hosting
 
 ```bash
-python3 -m http.server 8000 --directory /opt --bind 0.0.0.0
+python3 -m http.server 8000 --directory /opt/flag --bind 0.0.0.0
 ```
 
 💡 Tip: Set it to auto-start with a `systemd` service!
@@ -87,7 +88,7 @@ python3 -m http.server 8000 --directory /opt --bind 0.0.0.0
 
 ## 📝 Config
 
-Edit `/opt/config.json` to match your Sonos and preferences:
+Edit `/opt/flag/config.json` to match your Sonos and preferences:
 
 ```json
 {
@@ -114,10 +115,10 @@ Add these jobs:
 
 ```cron
 # Colors at 8:00 AM
-0 8 * * * /opt/sonos-env/bin/python /opt/sonos_play.py http://flag.aghy.home:8000/audio/colors.mp3
+0 8 * * * /opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://flag.aghy.home:8000/audio/colors.mp3
 
 # Sunset schedule update at 2:00 AM
-0 2 * * * /opt/schedule_sonos.sh
+0 2 * * * /opt/flag/schedule_sonos.sh
 ```
 
 ---
@@ -127,13 +128,13 @@ Add these jobs:
 Run manually:
 
 ```bash
-/opt/sonos-env/bin/python /opt/sonos_play.py http://flag.aghy.home:8000/audio/colors.mp3
+/opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://flag.aghy.home:8000/audio/colors.mp3
 ```
 
 Check the log:
 
 ```bash
-tail -n 10 /opt/sonos_play.log
+tail -n 10 /opt/flag/sonos_play.log
 ```
 
 ---
