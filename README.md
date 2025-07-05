@@ -103,3 +103,77 @@ Edit `/opt/flag/config.json` to match your Sonos and preferences:
 }
 ```
 ---
+
+## 🧪 Testing
+
+After setup, you should test that all components work:
+
+### 1. Test Audio HTTP Server
+
+Check if your audio files are served correctly:
+
+```bash
+curl -I http://localhost:8000/colors.mp3
+curl -I http://localhost:8000/taps.mp3
+```
+
+You should see `HTTP/1.0 200 OK` in the response headers.
+You can also test in your browser: [http://flag.aghy.home:8000/colors.mp3](http://flag.aghy.home:8000/colors.mp3)
+
+### 2. Test Sonos Playback Manually
+
+To test playback without waiting for the scheduled time, run:
+
+```bash
+/opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://flag.aghy.home:8000/colors.mp3
+```
+
+or, for taps:
+
+```bash
+/opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://flag.aghy.home:8000/taps.mp3
+```
+
+If it works, you'll hear the audio play on your Sonos and see log output in `/opt/flag/sonos_play.log`.
+
+### 3. Test Scheduling
+
+- Check that the cron jobs are installed:
+
+  ```bash
+  crontab -l
+  ```
+
+- You should see entries for the morning and sunset calls.
+
+- To test scheduling, you can temporarily edit the crontab to run a minute in the future and observe playback.
+
+### 4. Check Logs
+
+Review the log file for any errors or confirmations:
+
+```bash
+cat /opt/flag/sonos_play.log
+```
+
+---
+
+## 🛠️ Troubleshooting
+
+- **Check audio server:**  
+  `sudo systemctl status flag-audio-http`
+- **Check logs:**  
+  `cat /opt/flag/sonos_play.log`
+- **Check crontab:**  
+  `crontab -l`
+- **Test playback manually:**  
+  See the section above on manual testing.
+
+---
+
+## 🙏 Credits
+
+Created by agster27.  
+Inspired by tradition, powered by Python and Sonos.
+
+---
