@@ -39,16 +39,19 @@ function update_or_install() {
     echo "📁 Creating $AUDIO_DIR..."
     sudo mkdir -p "$AUDIO_DIR"
     sudo chown $(whoami) "$AUDIO_DIR"
-    cd "$INSTALL_DIR" || sudo mkdir -p "$INSTALL_DIR" && cd "$INSTALL_DIR"
+    sudo mkdir -p "$INSTALL_DIR"
+    sudo chown $(whoami) "$INSTALL_DIR"
+    cd "$INSTALL_DIR"
 
-    # Step 3: Download scripts from GitHub
+    # Step 3: Download all scripts from GitHub (add any new files here as needed)
     echo "⬇️  Downloading scripts from GitHub..."
-    wget -q "$BASE_URL/sonos_play.py" -O sonos_play.py
-    wget -q "$BASE_URL/sunset_timer.py" -O sunset_timer.py
-    wget -q "$BASE_URL/schedule_sonos.sh" -O schedule_sonos.sh
-    wget -q "$BASE_URL/audio_check.py" -O audio_check.py
+    FILES="sonos_play.py sunset_timer.py schedule_sonos.sh audio_check.py README.md LICENSE requirements.txt"
+    for file in $FILES; do
+        wget -q "$BASE_URL/$file" -O "$file" || echo "WARNING: $file could not be downloaded!"
+    done
 
-    chmod +x schedule_sonos.sh
+    # Make all .sh scripts executable
+    chmod +x *.sh 2>/dev/null || true
 
     # Step 4: Setup Python virtual environment
     echo "🐍 Setting up virtual environment..."
@@ -83,14 +86,7 @@ EOF
     echo "- Upload your colors.mp3 and taps.mp3 files to $AUDIO_DIR"
     echo "- Run $INSTALL_DIR/schedule_sonos.sh after 2AM to create the sunset cron job"
 
-    # Step 7: Set permissions on schedule_sonos.sh if it exists
-    if [ -f "$INSTALL_DIR/schedule_sonos.sh" ]; then
-        chmod 755 "$INSTALL_DIR/schedule_sonos.sh"
-    else
-        echo "⚠️  WARNING: $INSTALL_DIR/schedule_sonos.sh not found!"
-    fi
-
-    # Step 8: Add 8 AM Colors cronjob if it doesn't exist
+    # Step 7: Add 8 AM Colors cronjob if it doesn't exist
     CRON_CMD="$VENV_DIR/bin/python $INSTALL_DIR/sonos_play.py \$(jq -r .colors_url $CONFIG_FILE)"
     CRON_JOB="0 8 * * * $CRON_CMD"
     echo "📅 Checking crontab for 8 AM Colors job..."
