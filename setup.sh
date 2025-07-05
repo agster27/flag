@@ -52,19 +52,33 @@ function update_or_install() {
     sudo chown $(whoami) "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 
-    log "🌐 Fetching file list from GitHub API..."
+    # Download root files
+    log "🌐 Fetching file list from GitHub API (root)..."
     FILES=$(wget -qO- https://api.github.com/repos/agster27/flag/contents/ | jq -r '.[] | select(.type == "file") | .name')
     if [ -z "$FILES" ]; then
         log "❌ Could not fetch file list from GitHub. Exiting."
         exit 1
     fi
 
-    log "⬇️  Downloading scripts from GitHub..."
+    log "⬇️  Downloading scripts from GitHub (root)..."
     for file in $FILES; do
         if wget -q "$BASE_URL/$file" -O "$file"; then
             log "Downloaded: $file"
         else
             log "WARNING: $file could not be downloaded!"
+        fi
+    done
+
+    # Download all files in the audio directory from GitHub
+    log "🌐 Fetching audio file list from GitHub API (audio/)..."
+    AUDIO_FILES=$(wget -qO- https://api.github.com/repos/agster27/flag/contents/audio | jq -r '.[] | select(.type == "file") | .name')
+
+    log "⬇️  Downloading audio files from GitHub (audio/)..."
+    for audio_file in $AUDIO_FILES; do
+        if wget -q "$BASE_URL/audio/$audio_file" -O "$AUDIO_DIR/$audio_file"; then
+            log "Downloaded audio: $audio_file"
+        else
+            log "WARNING: $audio_file could not be downloaded!"
         fi
     done
 
@@ -120,8 +134,10 @@ Type=simple
 ExecStart=$VENV_DIR/bin/python -m http.server 8000 --directory $AUDIO_DIR
 WorkingDirectory=$AUDIO_DIR
 Restart=always
-User=root
-Group=root
+User=$(whoami)
+Group=$(whoami)
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -134,7 +150,7 @@ EOF
 
     log "✅ Setup complete. See $LOG_FILE for details."
     log "Make sure to:"
-    log "- Upload your colors.mp3 and taps.mp3 files to $AUDIO_DIR"
+    log "- Your colors.mp3 and taps.mp3 are in $AUDIO_DIR"
     log "- Your cron jobs are set up. To review, run: crontab -l"
     log "- Audio server is running. Check with: sudo systemctl status flag-audio-http"
 }
