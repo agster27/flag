@@ -6,6 +6,7 @@ import subprocess
 from datetime import datetime, timedelta
 from astral import LocationInfo
 from astral.sun import sun
+import pytz
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 CRON_MARKER = "# [flag_sonos_autogen]"
@@ -16,18 +17,37 @@ def load_config():
     with open(CONFIG_PATH, "r") as f:
         return json.load(f)
 
+def get_system_timezone():
+    """Try to determine the system timezone name."""
+    try:
+        # Try to read /etc/timezone (Debian/Ubuntu)
+        if os.path.exists("/etc/timezone"):
+            with open("/etc/timezone") as f:
+                return f.read().strip()
+        # Try timedatectl (works on many Linux systems)
+        tz = subprocess.check_output(["timedatectl", "show", "-p", "Timezone"], text=True).strip()
+        if "=" in tz:
+            return tz.split("=", 1)[1]
+    except Exception:
+        pass
+    # Fallback to UTC
+    return "UTC"
+
+def get_location(config):
+    # Fallbacks for missing config
+    city = config.get("city", "MyCity")
+    country = config.get("country", "MyCountry")
+    latitude = config.get("latitude", 40.7128)  # Default: NYC
+    longitude = config.get("longitude", -74.0060)
+    timezone = config.get("timezone")
+    if not timezone:
+        timezone = get_system_timezone()
+    return LocationInfo(city, country, timezone, latitude, longitude)
+
 def get_sunset_cron_time(config):
-    # You may want to set your real coordinates here
-    city = LocationInfo(
-        config.get("city", "New York"),
-        config.get("country", "USA"),
-        config.get("timezone", config.get("timezone", "US/Eastern")),
-        config.get("latitude", config.get("latitude", 40.7128)),
-        config.get("longitude", config.get("longitude", -74.0060)),
-    )
-    s = sun(city.observer, date=datetime.now().date(), tzinfo=city.timezone)
+    loc = get_location(config)
+    s = sun(loc.observer, date=datetime.now().date(), tzinfo=pytz.timezone(loc.timezone))
     sunset = s["sunset"]
-    # Add a small offset if you want (e.g. 2 min after sunset)
     sunset_time = sunset + timedelta(minutes=config.get("sunset_offset_minutes", 0))
     return sunset_time.hour, sunset_time.minute
 
