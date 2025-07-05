@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-SETUP_VERSION="1.1.0"
+SETUP_VERSION="1.2.0"
 
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"
@@ -44,7 +44,7 @@ function update_or_install() {
     log "🚀 Running setup.sh version $SETUP_VERSION"
     log "🔧 Setting up Sonos Scheduled Playback Environment..."
 
-    log "📦 Installing dependencies..."
+    log "📦 Installing system dependencies..."
     sudo apt update | tee -a "$LOG_FILE"
     sudo apt install -y python3-full python3-venv ffmpeg jq wget | tee -a "$LOG_FILE"
 
@@ -79,102 +79,76 @@ function update_or_install() {
     log "⬇️  Downloading audio files from GitHub (audio/)..."
     for audio_file in $AUDIO_FILES; do
         if wget -q "$BASE_URL/audio/$audio_file" -O "$AUDIO_DIR/$audio_file"; then
-            log "Downloaded audio: $audio_file"
+            log "Downloaded: audio/$audio_file"
         else
-            log "WARNING: $audio_file could not be downloaded!"
+            log "WARNING: audio/$audio_file could not be downloaded!"
         fi
     done
 
-    log "🔐 Making .sh and .py scripts executable..."
-    find "$INSTALL_DIR" -maxdepth 1 -type f \( -iname "*.sh" -o -iname "*.py" \) -exec chmod +x {} \;
+    # Create virtual environment if it doesn't exist
+    if [ ! -d "$VENV_DIR" ]; then
+        log "🐍 Creating Python virtual environment..."
+        python3 -m venv "$VENV_DIR"
+    fi
 
-    log "🐍 Setting up virtual environment..."
-    python3 -m venv "$VENV_DIR"
+    log "📦 Installing/updating Python dependencies in virtualenv..."
     source "$VENV_DIR/bin/activate"
+    pip install --upgrade pip
+    pip install -r requirements.txt
+    deactivate
 
-    log "📦 Installing Python packages..."
-    pip install --upgrade pip | tee -a "$LOG_FILE"
-    pip install soco astral pytz mutagen | tee -a "$LOG_FILE"
+    log "✅ Python dependencies installed."
 
-    CONFIG_FILE="$INSTALL_DIR/config.json"
-    if [ ! -f "$CONFIG_FILE" ]; then
-        log "📝 Creating default config.json..."
-        cat <<EOF > "$CONFIG_FILE"
-{
-  "sonos_ip": "192.168.1.50",
-  "volume": 30,
-  "colors_url": "http://flag.aghy.home:8000/audio/colors.mp3",
-  "taps_url": "http://flag.aghy.home:8000/audio/taps.mp3",
-  "default_wait_seconds": 60,
-  "skip_restore_if_idle": true
-}
-EOF
-    else
-        log "✅ config.json already exists. Skipping creation."
-    fi
-
-    # Step: Call schedule_sonos.py to update crontab
-    SCHEDULE_CMD="$VENV_DIR/bin/python $INSTALL_DIR/schedule_sonos.py"
-    if [ -x "$INSTALL_DIR/schedule_sonos.py" ]; then
-        log "🚀 Running schedule_sonos.py to update crontab..."
-        $SCHEDULE_CMD | tee -a "$LOG_FILE"
-        log "✅ schedule_sonos.py executed."
-    else
-        log "⚠️  schedule_sonos.py not found or not executable!"
-    fi
-
-    # --- Setup Audio HTTP server as a systemd service ---
-    SERVICE_FILE="/etc/systemd/system/flag-audio-http.service"
-    log "📝 Creating systemd service at $SERVICE_FILE..."
-
-    sudo tee "$SERVICE_FILE" > /dev/null <<EOF
+    # Systemd audio HTTP server setup
+    if [ ! -f /etc/systemd/system/flag-audio-http.service ]; then
+        log "⚙️  Installing systemd service for audio HTTP server..."
+        sudo tee /etc/systemd/system/flag-audio-http.service > /dev/null <<EOF
 [Unit]
 Description=Flag Audio HTTP Server
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=$VENV_DIR/bin/python -m http.server 8000 --directory $AUDIO_DIR
 WorkingDirectory=$AUDIO_DIR
+ExecStart=$VENV_DIR/bin/python -m http.server 8000 --directory $AUDIO_DIR --bind 0.0.0.0
 Restart=always
-User=$(whoami)
-Group=$(whoami)
-StandardOutput=journal
-StandardError=journal
+User=root
 
 [Install]
 WantedBy=multi-user.target
 EOF
+        sudo systemctl daemon-reload
+        sudo systemctl enable flag-audio-http
+    fi
 
-    log "🔄 Reloading systemd daemon and enabling audio HTTP server..."
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now flag-audio-http
-    log "✅ Audio HTTP server started and enabled! Files served at http://<your-host>:8000/"
+    log "🔄 Restarting audio HTTP server..."
+    sudo systemctl restart flag-audio-http
 
-    log "✅ Setup complete. See $LOG_FILE for details."
-    log "Make sure to:"
-    log "- Your colors.mp3 and taps.mp3 are in $AUDIO_DIR"
-    log "- Your cron jobs are set up. To review, run: crontab -l"
-    log "- Audio server is running. Check with: sudo systemctl status flag-audio-http"
+    # Informational output
+    log "🏁 Setup complete."
+    log ""
+    log "Test your setup:"
+    log "  curl -I http://localhost:8000/colors.mp3"
+    log ""
+    log "To test Sonos playback manually, run:"
+    log "  $VENV_DIR/bin/python $INSTALL_DIR/sonos_play.py http://flag.aghy.home:8000/colors.mp3"
+    log ""
+    log "Check status of audio server:"
+    log "  sudo systemctl status flag-audio-http"
+    log ""
+    log "Edit your config in: $INSTALL_DIR/config.json"
 }
 
-while true; do
-    prompt_menu
-    case $CHOICE in
-        1)
-            update_or_install
-            break
-            ;;
-        2)
-            uninstall_all
-            break
-            ;;
-        3)
-            log "👋 Exiting. No changes made."
-            exit 0
-            ;;
-        *)
-            echo "❌ Invalid option. Please enter 1, 2, or 3."
-            ;;
-    esac
-done
+prompt_menu
+case $CHOICE in
+    1)
+        update_or_install
+        ;;
+    2)
+        uninstall_all
+        ;;
+    *)
+        log "👋 Exiting without making changes."
+        exit 0
+        ;;
+esac
