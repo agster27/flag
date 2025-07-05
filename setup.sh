@@ -24,15 +24,14 @@ echo "📦 Installing Python packages..."
 pip install --upgrade pip
 pip install soco astral pytz mutagen
 
-# Step 4: Clone GitHub repo and copy Python scripts
-echo "📥 Cloning GitHub repository..."
+# Step 4: Clone GitHub repo or hard reset to latest main
+echo "📥 Cloning or updating GitHub repository..."
 cd /opt
-if [ -d "/opt/flag" ]; then
-    echo "🔁 Repo already exists, pulling latest changes..."
+if [ -d "/opt/flag/.git" ]; then
     cd /opt/flag
-    git checkout main 2>/dev/null || git checkout -b main
-    git branch --set-upstream-to=origin/main main 2>/dev/null
-    git pull
+    git fetch origin
+    git checkout main || git checkout -b main origin/main
+    git reset --hard origin/main
 else
     git clone https://github.com/agster27/flag.git /opt/flag
     cd /opt/flag
