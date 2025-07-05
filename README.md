@@ -143,9 +143,7 @@ MIT — use freely for civic, personal, or ceremonial purposes.
 
 ---
 
-## ✍️ Author
-
-🫡 Created by  
+## 🫡 Created by  
 Agster — Marine, civic leader, and builder of better systems.
 
 GitHub: [@agster27](https://github.com/agster27)
