@@ -8,14 +8,14 @@ from mutagen.mp3 import MP3
 from soco.snapshot import Snapshot
 
 # Load config
-with open("/opt/config.json") as f:
+with open("/opt/flag/config.json") as f:
     config = json.load(f)
 
 SONOS_IP = config["sonos_ip"]
 VOLUME = config["volume"]
 SKIP_RESTORE_IF_IDLE = config.get("skip_restore_if_idle", True)
 DEFAULT_WAIT = config.get("default_wait_seconds", 60)
-LOG_FILE = "/opt/sonos_play.log"
+LOG_FILE = "/opt/flag/sonos_play.log"
 AUDIO_URL = sys.argv[1]
 
 def log(message):
@@ -45,6 +45,7 @@ try:
 
     coordinator.stop()
     coordinator.volume = VOLUME
+
     coordinator.play_uri(AUDIO_URL)
     log(f"SUCCESS: Played {AUDIO_URL} on {coordinator.player_name}")
 
