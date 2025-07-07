@@ -12,6 +12,13 @@ Key Features:
 - Group coordination and management
 - State preservation and restoration
 - Backwards compatibility with old config formats
+- Safety checks to ensure all speakers are online before playback
+
+Safety Behavior:
+- All group speakers must be online and reachable before playback begins
+- If any speaker is offline or unreachable, the script aborts without
+  interrupting current playback to avoid unnecessary disruption
+- Group logic is always used, even for single speakers, for consistency
 
 Usage: python sonos_play.py <mp3_url>
 Config: Uses 'group_speakers' array in config.json
@@ -19,11 +26,17 @@ Config: Uses 'group_speakers' array in config.json
 The script will:
 1. Discover all Sonos speakers on the network
 2. Find the speakers specified in group_speakers
-3. Group them together (if multiple)
-4. Take a snapshot of the current state
-5. Play the specified audio
-6. Wait for playback to complete
-7. Restore the previous state
+3. Validate that ALL speakers are online and reachable
+4. Group them together (if multiple)
+5. Take a snapshot of the current state
+6. Play the specified audio
+7. Wait for playback to complete
+8. Restore the previous state
+
+Error Handling:
+- If any speaker is offline/unreachable, logs error and aborts
+- No playback interruption occurs if validation fails
+- Detailed logging for troubleshooting connectivity issues
 """
 
 import soco
@@ -125,6 +138,37 @@ def find_target_speakers(speakers):
     log(f"INFO: Found target speakers: {[s.player_name for s in target_speakers]}")
     return target_speakers
 
+def check_speaker_reachability(speaker):
+    """Check if a speaker is truly online and reachable"""
+    try:
+        # Try to get basic speaker information to verify connectivity
+        speaker_name = speaker.player_name
+        # Try to get current transport state - this requires active communication
+        transport_info = speaker.get_current_transport_info()
+        # Try to get volume - another active communication test
+        volume = speaker.volume
+        log(f"INFO: Speaker {speaker_name} is online and reachable")
+        return True
+    except Exception as e:
+        log(f"WARNING: Speaker {speaker.player_name if hasattr(speaker, 'player_name') else 'unknown'} is not reachable: {e}")
+        return False
+
+def validate_all_speakers_online(target_speakers):
+    """Validate that all target speakers are online and reachable before any playback interruption"""
+    offline_speakers = []
+    
+    for speaker in target_speakers:
+        if not check_speaker_reachability(speaker):
+            offline_speakers.append(speaker.player_name if hasattr(speaker, 'player_name') else str(speaker))
+    
+    if offline_speakers:
+        error_msg = f"Cannot proceed: The following speakers are offline or unreachable: {offline_speakers}. All group speakers must be online before playback begins to avoid unnecessary disruption."
+        log(f"ERROR: {error_msg}")
+        raise Exception(error_msg)
+    
+    log(f"INFO: All target speakers are online and reachable: {[s.player_name for s in target_speakers]}")
+    return True
+
 def get_group_coordinator(speakers):
     """Get or create a group coordinator from the target speakers"""
     if len(speakers) == 1:
@@ -156,6 +200,10 @@ try:
     
     # Find our target speakers
     target_speakers = find_target_speakers(all_speakers)
+    
+    # CRITICAL: Validate that all target speakers are online and reachable
+    # before taking any action that would interrupt current playback
+    validate_all_speakers_online(target_speakers)
     
     # Get or create group coordinator
     coordinator = get_group_coordinator(target_speakers)
