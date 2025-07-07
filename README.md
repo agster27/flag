@@ -12,6 +12,10 @@
 📄 Log every playback to `/opt/flag/sonos_play.log`  
 📡 Serve your MP3s via a **tiny HTTP server**  
 ⚙️ Customize everything via `/opt/flag/config.json`  
+🛡️ **Safety-first approach**: All group speakers must be online before playback begins  
+🚫 **No disruption**: Aborts without interrupting current playback if any speaker is offline  
+🎯 **Group logic**: Always uses group-based approach, even for single speakers  
+📊 **Smart error handling**: Detailed logging for offline/unreachable speakers  
 
 ---
 
@@ -112,8 +116,21 @@ The `group_speakers` field specifies which Sonos speakers to use for playback. T
 
 Speaker names should match the names shown in your Sonos app. The system will:
 1. Automatically discover all Sonos speakers on your network
-2. Group the specified speakers together for playback (if multiple)
-3. Play the audio on the group
+2. **Validate that ALL specified speakers are online and reachable**
+3. Group the specified speakers together for playback (if multiple)
+4. Play the audio on the group
+
+#### 🛡️ Safety Behavior
+
+**All group speakers must be online before playback begins** to avoid unnecessary disruption:
+
+- ✅ **All speakers online**: Playback proceeds normally
+- ❌ **Any speaker offline**: Script aborts without interrupting current playback
+- 📝 **Detailed logging**: Check `/opt/flag/sonos_play.log` for connectivity issues
+
+**Rationale**: This prevents scenarios where some speakers in a group are playing while others are silent due to network issues, ensuring consistent audio experience across all intended speakers.
+
+**Group logic is always used**, even for single speakers, to maintain consistent behavior and error handling.
 4. Restore the previous state after playback
 
 This approach ensures consistent behavior whether you're using one speaker or many, simplifying configuration and maintenance.
@@ -152,11 +169,14 @@ or, for taps:
 The script will automatically:
 - Discover all Sonos speakers on your network
 - Find the speakers specified in your `group_speakers` configuration  
+- **Validate that ALL speakers are online and reachable**
 - Group them together (if multiple speakers)
 - Play the audio on the group
 - Restore the previous playback state
 
 If it works, you'll hear the audio play on your configured speakers and see log output in `/opt/flag/sonos_play.log`.
+
+**Note**: If any speaker is offline or unreachable, the script will abort with an error message and will not interrupt any current playback.
 
 ### 3. Test Scheduling
 
@@ -190,6 +210,30 @@ cat /opt/flag/sonos_play.log
   `crontab -l`
 - **Test playback manually:**  
   See the section above on manual testing.
+
+### 🔌 Offline Speaker Issues
+
+If you see errors about speakers being offline or unreachable:
+
+1. **Check speaker power and network:**
+   - Ensure all speakers in `group_speakers` are powered on
+   - Verify speakers are connected to the same network
+   - Check if speakers appear in the Sonos app
+
+2. **Check network connectivity:**
+   - Test if speakers respond to ping: `ping <speaker-ip>`
+   - Verify firewall settings allow Sonos communication
+
+3. **Review error logs:**
+   - Look for "offline or unreachable" messages in `/opt/flag/sonos_play.log`
+   - Check for specific speaker names that failed connectivity tests
+
+4. **Speaker discovery:**
+   - The script automatically discovers speakers on your network
+   - Make sure speaker names in `group_speakers` match those in your Sonos app
+   - IP addresses can also be used instead of names if needed
+
+**Remember**: The script will **not interrupt current playback** if any speaker is offline. This safety feature prevents partial audio playback across your speaker group.
 
 ---
 
