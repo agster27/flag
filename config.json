@@ -7,5 +7,6 @@
   "skip_restore_if_idle": true,
   "latitude": 42.1,
   "longitude": -71.5,
-  "timezone": "America/New_York"
+  "timezone": "America/New_York",
+  "group_speakers": ["sonos-flag", "sonos-backyard"]
 }
