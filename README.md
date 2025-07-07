@@ -91,7 +91,6 @@ Edit `/opt/flag/config.json` to match your Sonos and preferences:
 
 ```json
 {
-  "sonos_ip": "192.168.1.50",
   "volume": 30,
   "colors_url": "http://flag.aghy.home:8000/colors.mp3",
   "taps_url": "http://flag.aghy.home:8000/taps.mp3",
@@ -99,9 +98,25 @@ Edit `/opt/flag/config.json` to match your Sonos and preferences:
   "skip_restore_if_idle": true,
   "latitude": 42.1,
   "longitude": -71.5,
-  "timezone": "America/New_York"
+  "timezone": "America/New_York",
+  "group_speakers": ["sonos-flag", "sonos-backyard"]
 }
 ```
+
+### 🔊 Speaker Configuration
+
+The `group_speakers` field specifies which Sonos speakers to use for playback. This unified approach works for both single speakers and groups:
+
+- **Single speaker**: `"group_speakers": ["living-room"]`
+- **Multiple speakers**: `"group_speakers": ["living-room", "kitchen", "bedroom"]`
+
+Speaker names should match the names shown in your Sonos app. The system will:
+1. Automatically discover all Sonos speakers on your network
+2. Group the specified speakers together for playback (if multiple)
+3. Play the audio on the group
+4. Restore the previous state after playback
+
+This approach ensures consistent behavior whether you're using one speaker or many, simplifying configuration and maintenance.
 ---
 
 ## 🧪 Testing
@@ -122,7 +137,7 @@ You can also test in your browser: [http://flag.aghy.home:8000/colors.mp3](http:
 
 ### 2. Test Sonos Playback Manually
 
-To test playback without waiting for the scheduled time, run:
+To test playbook without waiting for the scheduled time, run:
 
 ```bash
 /opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://flag.aghy.home:8000/colors.mp3
@@ -134,7 +149,14 @@ or, for taps:
 /opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://flag.aghy.home:8000/taps.mp3
 ```
 
-If it works, you'll hear the audio play on your Sonos and see log output in `/opt/flag/sonos_play.log`.
+The script will automatically:
+- Discover all Sonos speakers on your network
+- Find the speakers specified in your `group_speakers` configuration  
+- Group them together (if multiple speakers)
+- Play the audio on the group
+- Restore the previous playback state
+
+If it works, you'll hear the audio play on your configured speakers and see log output in `/opt/flag/sonos_play.log`.
 
 ### 3. Test Scheduling
 
