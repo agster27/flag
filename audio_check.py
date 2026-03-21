@@ -2,11 +2,10 @@
 
 import os
 import subprocess
-import sys
 from mutagen.mp3 import MP3
 from mutagen import MutagenError
+from config import AUDIO_DIR
 
-AUDIO_DIR = "/opt/flag/audio"
 VALID_SAMPLE_RATES = [44100, 48000]
 VALID_CHANNELS = 2
 VALID_EXTENSION = ".mp3"
@@ -14,9 +13,7 @@ VALID_EXTENSION = ".mp3"
 def is_valid_mp3(filepath):
     try:
         audio = MP3(filepath)
-        if audio.info.sample_rate in VALID_SAMPLE_RATES and audio.info.channels == VALID_CHANNELS:
-            return True
-        return False
+        return audio.info.sample_rate in VALID_SAMPLE_RATES and audio.info.channels == VALID_CHANNELS
     except MutagenError:
         return False
 

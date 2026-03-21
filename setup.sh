@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-SETUP_VERSION="1.2.2"
+SETUP_VERSION="1.3.0"
 
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"

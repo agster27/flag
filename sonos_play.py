@@ -1,63 +1,78 @@
+import argparse
+import os
 import soco
-import sys
+import tempfile
 import time
-import json
 import urllib.request
 from datetime import datetime
 from mutagen.mp3 import MP3
 from soco.snapshot import Snapshot
+from config import load_config, LOG_FILE
 
-# Load config
-with open("/opt/flag/config.json") as f:
-    config = json.load(f)
-
-SONOS_IP = config["sonos_ip"]
-VOLUME = config["volume"]
-SKIP_RESTORE_IF_IDLE = config.get("skip_restore_if_idle", True)
-DEFAULT_WAIT = config.get("default_wait_seconds", 60)
-LOG_FILE = "/opt/flag/sonos_play.log"
-AUDIO_URL = sys.argv[1]
 
 def log(message):
     with open(LOG_FILE, "a") as f:
         f.write(f"{datetime.now().isoformat()} - {message}\n")
 
-def get_mp3_duration(url):
+
+def get_mp3_duration(url, default_wait):
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+    temp_file = tmp.name
+    tmp.close()
     try:
-        temp_file = "/tmp/temp_scheduled_song.mp3"
         urllib.request.urlretrieve(url, temp_file)
         audio = MP3(temp_file)
         return int(audio.info.length)
     except Exception as e:
-        log(f"WARNING: Could not get duration. Defaulting to {DEFAULT_WAIT} sec. Error: {e}")
-        return DEFAULT_WAIT
+        log(f"WARNING: Could not get duration. Defaulting to {default_wait} sec. Error: {e}")
+        return default_wait
+    finally:
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
 
-try:
-    speaker = soco.SoCo(SONOS_IP)
-    coordinator = speaker.group.coordinator
 
-    state = coordinator.get_current_transport_info()["current_transport_state"]
-    was_playing = state == "PLAYING"
+def main():
+    parser = argparse.ArgumentParser(description="Play an audio URL on a Sonos speaker.")
+    parser.add_argument("audio_url", help="URL of the MP3 file to play")
+    args = parser.parse_args()
 
-    snapshot = Snapshot(coordinator)
-    snapshot.snapshot()
-    log(f"INFO: Took snapshot of {coordinator.player_name} (was_playing={was_playing})")
+    config = load_config()
+    sonos_ip = config["sonos_ip"]
+    volume = config["volume"]
+    skip_restore_if_idle = config.get("skip_restore_if_idle", True)
+    default_wait = config.get("default_wait_seconds", 60)
+    audio_url = args.audio_url
 
-    coordinator.stop()
-    coordinator.volume = VOLUME
+    try:
+        speaker = soco.SoCo(sonos_ip)
+        coordinator = speaker.group.coordinator
 
-    coordinator.play_uri(AUDIO_URL)
-    log(f"SUCCESS: Played {AUDIO_URL} on {coordinator.player_name}")
+        state = coordinator.get_current_transport_info()["current_transport_state"]
+        was_playing = state == "PLAYING"
 
-    duration = get_mp3_duration(AUDIO_URL)
-    log(f"INFO: Waiting {duration} seconds for playback to finish")
-    time.sleep(duration)
+        snapshot = Snapshot(coordinator)
+        snapshot.snapshot()
+        log(f"INFO: Took snapshot of {coordinator.player_name} (was_playing={was_playing})")
 
-    if was_playing or not SKIP_RESTORE_IF_IDLE:
-        snapshot.restore()
-        log(f"INFO: Restored previous playback on {coordinator.player_name}")
-    else:
-        log("INFO: No prior playback. Skipping restore.")
+        coordinator.stop()
+        coordinator.volume = volume
 
-except Exception as e:
-    log(f"ERROR: Failed during scheduled play - {e}")
+        coordinator.play_uri(audio_url)
+        log(f"SUCCESS: Played {audio_url} on {coordinator.player_name}")
+
+        duration = get_mp3_duration(audio_url, default_wait)
+        log(f"INFO: Waiting {duration} seconds for playback to finish")
+        time.sleep(duration)
+
+        if was_playing or not skip_restore_if_idle:
+            snapshot.restore()
+            log(f"INFO: Restored previous playback on {coordinator.player_name}")
+        else:
+            log("INFO: No prior playback. Skipping restore.")
+
+    except Exception as e:
+        log(f"ERROR: Failed during scheduled play - {e}")
+
+
+if __name__ == "__main__":
+    main()
