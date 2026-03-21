@@ -1,3 +1,10 @@
+"""
+sonos_play.py — Plays an MP3 URL on a Sonos speaker and restores prior playback.
+
+Accepts a single audio URL argument, snapshots the current Sonos state,
+plays the requested file, waits for playback to finish, and optionally
+restores the previous state. All events are logged to LOG_FILE.
+"""
 import argparse
 import os
 import soco
@@ -11,11 +18,30 @@ from config import load_config, LOG_FILE
 
 
 def log(message):
+    """
+    Append a timestamped message to the log file.
+
+    Args:
+        message (str): The message to log.
+    """
     with open(LOG_FILE, "a") as f:
         f.write(f"{datetime.now().isoformat()} - {message}\n")
 
 
 def get_mp3_duration(url, default_wait):
+    """
+    Download an MP3 from *url* and return its duration in whole seconds.
+
+    If the file cannot be downloaded or its duration cannot be read, the
+    function logs a warning and returns *default_wait* as the fallback.
+
+    Args:
+        url (str): URL of the MP3 file.
+        default_wait (int): Fallback duration in seconds.
+
+    Returns:
+        int: Duration of the MP3 in seconds, or *default_wait* on failure.
+    """
     tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
     temp_file = tmp.name
     tmp.close()
@@ -32,6 +58,14 @@ def get_mp3_duration(url, default_wait):
 
 
 def main():
+    """
+    Entry point: parse arguments, play the requested audio on Sonos, and restore state.
+
+    Reads configuration from config.json, snapshots the current Sonos playback
+    state, plays the given audio URL at the configured volume, waits for the
+    track to finish, and restores previous playback unless the speaker was idle
+    and skip_restore_if_idle is enabled.
+    """
     parser = argparse.ArgumentParser(description="Play an audio URL on a Sonos speaker.")
     parser.add_argument("audio_url", help="URL of the MP3 file to play")
     args = parser.parse_args()
