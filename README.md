@@ -49,10 +49,10 @@ After setup, your `/opt/flag/` folder should look like:
 
 ```
 /opt/flag/
-├── sonos_play.py          # Plays the MP3
-├── sunset_timer.py        # Calculates sunset
-├── schedule_sonos.sh      # Adds dynamic sunset cron
-├── audio_check.py         # Audio check script
+├── sonos_play.py          # Plays the MP3 on Sonos
+├── schedule_sonos.py      # Calculates sunset and writes cron jobs
+├── audio_check.py         # Validates and converts audio files
+├── config.py              # Central configuration loader
 ├── README.md              # Project readme (downloaded for reference)
 ├── LICENSE                # Project license (downloaded for reference)
 ├── requirements.txt       # Python requirements (downloaded for reference)
@@ -99,9 +99,22 @@ Edit `/opt/flag/config.json` to match your Sonos and preferences:
   "skip_restore_if_idle": true,
   "latitude": 42.1,
   "longitude": -71.5,
-  "timezone": "America/New_York"
+  "timezone": "America/New_York",
+  "sunset_offset_minutes": 0
 }
 ```
+
+| Key | Description |
+|-----|-------------|
+| `sonos_ip` | IP address of your Sonos speaker |
+| `volume` | Playback volume (0–100) |
+| `colors_url` | URL of the Colors MP3 served by the HTTP server |
+| `taps_url` | URL of the Taps MP3 served by the HTTP server |
+| `default_wait_seconds` | Fallback wait time (seconds) if MP3 duration cannot be determined |
+| `skip_restore_if_idle` | If `true`, do not restore prior playback when speaker was idle |
+| `latitude` / `longitude` | Your coordinates, used to calculate local sunset time |
+| `timezone` | IANA timezone name (e.g. `"America/New_York"`) |
+| `sunset_offset_minutes` | Optional offset in minutes from sunset (negative = before, positive = after). Defaults to `0` |
 ---
 
 ## 🧪 Testing

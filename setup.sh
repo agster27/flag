@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+set -o pipefail
 
 SETUP_VERSION="1.3.0"
 
@@ -33,11 +34,11 @@ function uninstall_all() {
     crontab -l 2>/dev/null | grep -v "$INSTALL_DIR" > "$TMPCRON" || true
     crontab "$TMPCRON" || true
     rm -f "$TMPCRON"
-    log "✅ All files and cron jobs removed!"
     sudo systemctl disable --now flag-audio-http 2>/dev/null || true
     sudo rm -f /etc/systemd/system/flag-audio-http.service
     sudo systemctl daemon-reload
     sudo rm -rf "$INSTALL_DIR"
+    log "✅ All files and cron jobs removed!"
     exit 0
 }
 
