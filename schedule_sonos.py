@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
 import os
 import sys
-import json
 import subprocess
 from datetime import datetime, timedelta
 from astral import LocationInfo
 from astral.sun import sun
 import pytz
+from config import load_config, INSTALL_DIR
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 CRON_MARKER = "# [flag_sonos_autogen]"
-PYTHON_BIN = os.path.join(os.path.dirname(__file__), "sonos-env", "bin", "python")
-SONOS_PLAY = os.path.join(os.path.dirname(__file__), "sonos_play.py")
-
-def load_config():
-    with open(CONFIG_PATH, "r") as f:
-        return json.load(f)
+PYTHON_BIN = os.path.join(INSTALL_DIR, "sonos-env", "bin", "python")
+SONOS_PLAY = os.path.join(INSTALL_DIR, "sonos_play.py")
 
 def get_system_timezone():
     """Try to determine the system timezone name."""
@@ -60,8 +55,16 @@ def get_crontab():
 
 def write_crontab(lines):
     cron_text = "\n".join(lines) + "\n"
-    proc = subprocess.Popen(['crontab', '-'], stdin=subprocess.PIPE, text=True)
-    proc.communicate(input=cron_text)
+    result = subprocess.run(
+        ['crontab', '-'],
+        input=cron_text,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"crontab write failed with return code {result.returncode}: {result.stderr.strip()}"
+        )
 
 def build_cron_entry(minute, hour, command):
     return f"{minute} {hour} * * * {command} {CRON_MARKER}"
