@@ -9,5 +9,6 @@
   "latitude": 42.1,
   "longitude": -71.5,
   "timezone": "America/New_York",
+  "colors_time": "08:00",
   "sunset_offset_minutes": 0
 }
