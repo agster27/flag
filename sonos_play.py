@@ -7,6 +7,7 @@ restores the previous state. All events are logged to LOG_FILE.
 """
 import argparse
 import os
+import sys
 import soco
 import tempfile
 import time
@@ -48,7 +49,9 @@ def get_mp3_duration(url, default_wait):
     try:
         urllib.request.urlretrieve(url, temp_file)
         audio = MP3(temp_file)
-        return int(audio.info.length)
+        duration = int(audio.info.length)
+        log(f"INFO: MP3 duration is {duration} seconds")
+        return duration
     except Exception as e:
         log(f"WARNING: Could not get duration. Defaulting to {default_wait} sec. Error: {e}")
         return default_wait
@@ -87,6 +90,7 @@ def main():
         snapshot = Snapshot(coordinator)
         snapshot.snapshot()
         log(f"INFO: Took snapshot of {coordinator.player_name} (was_playing={was_playing})")
+        print(f"  ⏳ Connected to {coordinator.player_name}.")
 
         coordinator.stop()
         coordinator.volume = volume
@@ -94,18 +98,23 @@ def main():
         coordinator.play_uri(audio_url)
         log(f"SUCCESS: Played {audio_url} on {coordinator.player_name}")
 
+        print("  ⏳ Fetching audio duration...")
         duration = get_mp3_duration(audio_url, default_wait)
         log(f"INFO: Waiting {duration} seconds for playback to finish")
+        print(f"  ▶️  Playing — waiting ~{duration} seconds for playback to finish...")
         time.sleep(duration)
 
         if was_playing or not skip_restore_if_idle:
             snapshot.restore()
             log(f"INFO: Restored previous playback on {coordinator.player_name}")
+            print("  ✅ Playback complete. State restored.")
         else:
             log("INFO: No prior playback. Skipping restore.")
+            print("  ✅ Playback complete. (No prior playback — skipping restore.)")
 
     except Exception as e:
         log(f"ERROR: Failed during scheduled play - {e}")
+        print(f"  ❌ Error during playback: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

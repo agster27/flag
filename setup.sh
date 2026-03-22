@@ -301,6 +301,9 @@ function test_sonos_playback() {
     echo "  🔊 Playing test sound on $SONOS_IP ..."
     echo "     URL: $TEST_URL"
     echo ""
+    echo "  ⏳ This may take 30–90 seconds. Watch progress:"
+    echo "     tail -f $LOG_FILE"
+    echo ""
 
     TMPCONFIG=$(mktemp --suffix=.json) || { echo "  ❌ Failed to create temp file."; return 1; }
     if ! jq --arg ip "$SONOS_IP" '.sonos_ip = $ip' "$CONFIG_FILE" > "$TMPCONFIG"; then
@@ -317,6 +320,7 @@ function test_sonos_playback() {
     else
         echo "  ❌ Test playback failed. Check $LOG_FILE for details."
     fi
+    echo "  📋 Full log: $LOG_FILE"
 }
 
 function prompt_menu() {
