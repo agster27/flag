@@ -54,6 +54,10 @@ function cfg_default() {
 # Uses the current $PORT value.
 # ---------------------------------------------------------------------------
 function write_service_file() {
+    if [ -z "$PORT" ]; then
+        log "❌ PORT is not set. Cannot write audio HTTP service file."
+        exit 1
+    fi
     log "⚙️  Writing systemd service for audio HTTP server (port $PORT)..."
     maybe_sudo tee /etc/systemd/system/flag-audio-http.service > /dev/null <<EOF
 [Unit]
@@ -160,6 +164,17 @@ function configure_setup() {
     if ! command -v jq &>/dev/null; then
         echo "  ⚠️  'jq' not found. Installing..."
         maybe_sudo apt-get install -y jq
+    fi
+
+    # Validate existing config JSON before reading it
+    if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
+        if ! jq empty "$CONFIG_FILE" &>/dev/null; then
+            echo "  ⚠️  WARNING: $CONFIG_FILE contains invalid JSON and cannot be read."
+            echo "  Your existing config will be ignored and defaults will be used."
+            echo "  The broken file has been moved to ${CONFIG_FILE}.bak for inspection."
+            cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+            rm -f "$CONFIG_FILE"
+        fi
     fi
 
     # Sonos IP — try auto-discovery first
@@ -568,8 +583,8 @@ function update_or_install() {
     log "🔧 Setting up Sonos Scheduled Playback Environment..."
 
     log "📦 Installing system dependencies..."
-    maybe_sudo apt update | tee -a "$LOG_FILE"
-    maybe_sudo apt install -y python3-full python3-venv ffmpeg jq wget | tee -a "$LOG_FILE"
+    maybe_sudo apt-get update | tee -a "$LOG_FILE" || { log "❌ apt-get update failed. Check your network connection."; exit 1; }
+    maybe_sudo apt-get install -y python3-full python3-venv ffmpeg jq wget | tee -a "$LOG_FILE" || { log "❌ apt-get install failed. Check the log above for details."; exit 1; }
 
     log "📁 Creating $AUDIO_DIR..."
     maybe_sudo mkdir -p "$AUDIO_DIR"

@@ -86,8 +86,8 @@ You do **not** need to run `git clone` or start the server manually.
 
 Your files will be available at:
 
-- [http://flag.aghy.home:8000/colors.mp3](http://flag.aghy.home:8000/colors.mp3)
-- [http://flag.aghy.home:8000/taps.mp3](http://flag.aghy.home:8000/taps.mp3)
+- [http://<your-pi-ip>:8000/colors.mp3](http://<your-pi-ip>:8000/colors.mp3)
+- [http://<your-pi-ip>:8000/taps.mp3](http://<your-pi-ip>:8000/taps.mp3)
 
 Check the server status or restart it with:
 
@@ -205,13 +205,13 @@ You should see `HTTP/1.0 200 OK` in the response headers.
 To test playback without waiting for the scheduled time, run:
 
 ```bash
-/opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://flag.aghy.home:8000/colors.mp3
+/opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://<your-pi-ip>:8000/colors.mp3
 ```
 
 or, for taps:
 
 ```bash
-/opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://flag.aghy.home:8000/taps.mp3
+/opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://<your-pi-ip>:8000/taps.mp3
 ```
 
 If it works, you'll hear the audio play on your Sonos and see log output in `/opt/flag/sonos_play.log`.

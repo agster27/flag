@@ -479,7 +479,10 @@ def main():
         )
 
     config = load_config()
-    tz_name = config.get("timezone") or get_system_timezone()
+    # Ensure timezone is set in config so all downstream functions use the same value
+    if not config.get("timezone"):
+        config["timezone"] = get_system_timezone()
+    tz_name = config["timezone"]
 
     schedules = resolve_schedules(config)
     if not schedules:
