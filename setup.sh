@@ -174,20 +174,28 @@ function configure_setup() {
     done
 
     # Hostname / IP this machine is reachable at
-    # Use $default_port here (same value as $PORT) so the fallback is always valid
-    # Preferred: use the IP that the kernel would route toward the Sonos speaker
+    # Preferred: find a local IP on the same /24 subnet as the Sonos speaker
     local_ip=""
     if [ -n "$SONOS_IP" ]; then
-        # 'ip route get <dst>' outputs a line containing "src <local-ip>"; extract that token
-        local_ip=$(ip route get "$SONOS_IP" 2>/dev/null \
-            | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' \
-            | head -1)
-        # Discard the result if it doesn't look like an IPv4 address
-        if [[ ! "$local_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            local_ip=""
+        sonos_prefix=$(echo "$SONOS_IP" | cut -d. -f1-3)
+        while IFS= read -r candidate; do
+            if [[ "$candidate" == "${sonos_prefix}."* ]]; then
+                local_ip="$candidate"
+                break
+            fi
+        done < <(hostname -I | tr ' ' '\n')
+
+        # Fallback: use the kernel's preferred source IP toward the Sonos speaker
+        if [ -z "$local_ip" ]; then
+            local_ip=$(ip route get "$SONOS_IP" 2>/dev/null \
+                | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' \
+                | head -1)
+            if [[ ! "$local_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                local_ip=""
+            fi
         fi
     fi
-    # Fallback: first non-loopback IP from hostname -I
+    # Final fallback: first non-loopback IP
     if [ -z "$local_ip" ]; then
         local_ip=$(hostname -I | awk '{print $1}')
     fi
