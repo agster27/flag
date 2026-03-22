@@ -6,8 +6,8 @@ Defines install paths and provides load_config() for reading config.json.
 import json
 import os
 
-INSTALL_DIR = "/opt/flag"
-CONFIG_PATH = os.path.join(INSTALL_DIR, "config.json")
+INSTALL_DIR = os.environ.get("FLAG_INSTALL_DIR", "/opt/flag")
+CONFIG_PATH = os.environ.get("FLAG_CONFIG", os.path.join(INSTALL_DIR, "config.json"))
 AUDIO_DIR = os.path.join(INSTALL_DIR, "audio")
 LOG_FILE = os.path.join(INSTALL_DIR, "sonos_play.log")
 

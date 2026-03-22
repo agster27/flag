@@ -267,14 +267,59 @@ EOF
 
 # ---------------------------------------------------------------------------
 
+function test_sonos_playback() {
+    echo ""
+    echo "============================================"
+    echo "  Test Sonos Playback                       "
+    echo "============================================"
+
+    if [ ! -d "$VENV_DIR" ]; then
+        echo "  ⚠️  Python venv not found. Please run Install first (option 1)."
+        return
+    fi
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "  ⚠️  config.json not found. Please run Install or Reconfigure first."
+        return
+    fi
+
+    discover_sonos_ip
+
+    if [ -z "$SONOS_IP" ]; then
+        read -rp "  Enter Sonos speaker IP to test: " SONOS_IP
+    fi
+    if [ -z "$SONOS_IP" ]; then
+        echo "  ⚠️  No IP provided. Aborting test."
+        return
+    fi
+
+    TEST_URL=$(jq -r '.colors_url' "$CONFIG_FILE")
+    echo ""
+    echo "  🔊 Playing test sound on $SONOS_IP ..."
+    echo "     URL: $TEST_URL"
+    echo ""
+
+    TMPCONFIG=$(mktemp --suffix=.json) || { echo "  ❌ Failed to create temp file."; return 1; }
+    jq --arg ip "$SONOS_IP" '.sonos_ip = $ip' "$CONFIG_FILE" > "$TMPCONFIG"
+
+    FLAG_CONFIG="$TMPCONFIG" "$VENV_DIR/bin/python" "$INSTALL_DIR/sonos_play.py" "$TEST_URL"
+    PLAY_EXIT=$?
+    rm -f "$TMPCONFIG"
+    if [ $PLAY_EXIT -eq 0 ]; then
+        echo "  ✅ Test playback complete."
+    else
+        echo "  ❌ Test playback failed. Check $LOG_FILE for details."
+    fi
+}
+
 function prompt_menu() {
     echo ""
     echo "What would you like to do?"
     echo "1) Install / update to the latest scripts"
     echo "2) Reconfigure (edit config.json interactively)"
-    echo "3) Uninstall completely"
-    echo "4) Exit without doing anything"
-    read -rp "Enter your choice [1-4]: " CHOICE
+    echo "3) Test Sonos playback"
+    echo "4) Uninstall completely"
+    echo "5) Exit without doing anything"
+    read -rp "Enter your choice [1-5]: " CHOICE
 }
 
 function uninstall_all() {
@@ -416,6 +461,9 @@ case $CHOICE in
         log "✅ Reconfiguration complete."
         ;;
     3)
+        test_sonos_playback
+        ;;
+    4)
         uninstall_all
         ;;
     *)
