@@ -11,6 +11,10 @@ CONFIG_PATH = os.path.join(INSTALL_DIR, "config.json")
 AUDIO_DIR = os.path.join(INSTALL_DIR, "audio")
 LOG_FILE = os.path.join(INSTALL_DIR, "sonos_play.log")
 
+# Convenience accessor — available after load_config() has been called
+def get_port(cfg: dict) -> int:
+    return int(cfg.get("port", 8000))
+
 
 def load_config(path=None):
     """
