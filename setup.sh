@@ -323,6 +323,12 @@ function prompt_menu() {
 }
 
 function uninstall_all() {
+    echo ""
+    read -rp "  ⚠️  This will permanently remove all files, cron jobs, and the systemd service. Are you sure? [y/N]: " CONFIRM
+    if [[ "${CONFIRM,,}" != "y" ]]; then
+        echo "  Uninstall cancelled."
+        return
+    fi
     log "🚨 Uninstalling Honor Tradition with Tech..."
     TMPCRON=$(mktemp)
     crontab -l 2>/dev/null | grep -v "$INSTALL_DIR" > "$TMPCRON" || true
@@ -332,7 +338,7 @@ function uninstall_all() {
     maybe_sudo rm -f /etc/systemd/system/flag-audio-http.service
     maybe_sudo systemctl daemon-reload
     maybe_sudo rm -rf "$INSTALL_DIR"
-    log "✅ All files and cron jobs removed!"
+    echo "✅ All files and cron jobs removed!"
     exit 0
 }
 
