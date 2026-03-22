@@ -404,6 +404,13 @@ function configure_setup() {
         done
         echo ""
         echo "  ℹ️  To add more plays later, use option 1) List scheduled plays from the main menu."
+        echo ""
+        read -rp "  Continue? [Y/n]: " _continue
+        _continue="${_continue:-y}"
+        if [[ "${_continue,,}" == "n" ]]; then
+            echo "  ⚠️  Configuration cancelled."
+            return
+        fi
     fi
 
     # Safety net: if no schedules ended up configured, restore defaults
@@ -912,65 +919,67 @@ function upgrade_scripts() {
 
 # ---------------------------------------------------------------------------
 
-detect_install_state
-prompt_menu
-case $CHOICE in
-    1)
-        if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
-            show_install_required_msg
-        else
-            list_scheduled_plays
-        fi
-        ;;
-    2)
-        if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
-            show_install_required_msg
-        else
-            test_sonos_playback
-        fi
-        ;;
-    3)
-        if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
-            show_install_required_msg
-        else
-            view_logs
-        fi
-        ;;
-    4)
-        install_fresh
-        ;;
-    5)
-        if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
-            show_install_required_msg
-        else
-            upgrade_scripts
-        fi
-        ;;
-    6)
-        if [ "$INSTALL_STATE" = "none" ]; then
-            show_install_required_msg
-        else
-            configure_setup
-            # Rewrite service file with new port and hot-reload
-            PORT=$(jq -r '.port' "$CONFIG_FILE")
-            write_service_file
-            maybe_sudo systemctl enable flag-audio-http
-            maybe_sudo systemctl restart flag-audio-http 2>/dev/null || true
-            # Regenerate systemd timer units with the updated config
-            if [ -d "$VENV_DIR" ]; then
-                log "🗓️  Regenerating systemd timer units..."
-                maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
+while true; do
+    detect_install_state
+    prompt_menu
+    case $CHOICE in
+        1)
+            if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
+                show_install_required_msg
             else
-                log "⚠️  Python venv not found. Run option 4 (Install) to create systemd timers."
+                list_scheduled_plays
             fi
-            log "✅ Reconfiguration complete."
-        fi
-        ;;
-    7)
-        uninstall_all
-        ;;
-    *)
-        log "👋 Exiting without making changes."
-        exit 0
-        ;;
-esac
+            ;;
+        2)
+            if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
+                show_install_required_msg
+            else
+                test_sonos_playback
+            fi
+            ;;
+        3)
+            if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
+                show_install_required_msg
+            else
+                view_logs
+            fi
+            ;;
+        4)
+            install_fresh
+            ;;
+        5)
+            if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
+                show_install_required_msg
+            else
+                upgrade_scripts
+            fi
+            ;;
+        6)
+            if [ "$INSTALL_STATE" = "none" ]; then
+                show_install_required_msg
+            else
+                configure_setup
+                # Rewrite service file with new port and hot-reload
+                PORT=$(jq -r '.port' "$CONFIG_FILE")
+                write_service_file
+                maybe_sudo systemctl enable flag-audio-http
+                maybe_sudo systemctl restart flag-audio-http 2>/dev/null || true
+                # Regenerate systemd timer units with the updated config
+                if [ -d "$VENV_DIR" ]; then
+                    log "🗓️  Regenerating systemd timer units..."
+                    maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
+                else
+                    log "⚠️  Python venv not found. Run option 4 (Install) to create systemd timers."
+                fi
+                log "✅ Reconfiguration complete."
+            fi
+            ;;
+        7)
+            uninstall_all
+            ;;
+        *)
+            log "👋 Exiting without making changes."
+            exit 0
+            ;;
+    esac
+done
