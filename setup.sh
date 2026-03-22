@@ -395,6 +395,17 @@ function configure_setup() {
         _scount=2
     fi
 
+    # Show the user what's been pre-populated before asking for more
+    if [ "$_scount" -gt 0 ]; then
+        echo ""
+        echo "  Default scheduled plays:"
+        for (( _i=0; _i<_scount; _i++ )); do
+            echo "    $(( _i + 1 )). name='${_snames[$_i]}'  file='${_sfiles[$_i]}'  time='${_stimes[$_i]}'"
+        done
+        echo ""
+        echo "  ℹ️  To add more plays later, use option 1) List scheduled plays from the main menu."
+    fi
+
     # Prompt to add additional scheduled plays
     while true; do
         echo ""
