@@ -1,50 +1,88 @@
 #!/usr/bin/env python3
 """
-schedule_sonos.py — Calculates today's sunset and writes the Sonos cron schedule.
+schedule_sonos.py — Generates systemd timer and service unit files for Sonos audio scheduling.
 
-Reads location and timezone from config.json, computes sunset time using the
-astral library, and installs three cron jobs: Colors at a configured local time
-(default 08:00), Taps at sunset (with an optional offset), and a daily
-self-reschedule at 02:00 to keep the sunset time accurate.
+Reads configuration from config.json, computes sunset time (using the astral library
+when needed), and writes systemd .service and .timer unit files for each scheduled
+audio play. Also generates a daily ``flag-reschedule`` timer that re-runs this script
+at 02:00 local time to keep sunset-based timers accurate.
 
-All times are converted from the configured local timezone to UTC before being
-written to cron, because cron always fires at the system clock time (UTC on
-most servers).
+Unit files are written to /etc/systemd/system/ and therefore require root privileges.
+
+Supports an extensible ``schedules`` array in config.json, with backward compatibility
+for the legacy flat ``colors_url`` / ``taps_url`` / ``colors_time`` keys. If those old
+keys are present but ``schedules`` is absent, a deprecation warning is printed and a
+synthetic schedule list is built automatically.
 """
+
+import glob as _glob
 import os
+import re
 import subprocess
+import sys
+import tempfile
 from datetime import datetime, timedelta
+
 from astral import LocationInfo
 from astral.sun import sun
 import pytz
+
 from config import load_config, INSTALL_DIR
 
-CRON_MARKER = "# [flag_sonos_autogen]"
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+SYSTEMD_DIR = "/etc/systemd/system"
 PYTHON_BIN = os.path.join(INSTALL_DIR, "sonos-env", "bin", "python")
 SONOS_PLAY = os.path.join(INSTALL_DIR, "sonos_play.py")
+SCHEDULE_SCRIPT = os.path.abspath(__file__)
+
+# Name suffixes (after "flag-") of units that must never be removed by stale cleanup
+_RESERVED_NAMES = {"audio-http", "reschedule"}
+
+
+# ---------------------------------------------------------------------------
+# Timezone / Location helpers
+# ---------------------------------------------------------------------------
 
 def get_system_timezone():
-    """Try to determine the system timezone name."""
+    """
+    Determine the current system timezone name.
+
+    Tries ``/etc/timezone`` (Debian/Ubuntu), then ``timedatectl``, falling
+    back to ``"UTC"`` on any error.
+
+    Returns:
+        str: IANA timezone name (e.g. ``"America/New_York"``).
+    """
     try:
-        # Try to read /etc/timezone (Debian/Ubuntu)
+        # Debian/Ubuntu provide a plain text timezone file
         if os.path.exists("/etc/timezone"):
             with open("/etc/timezone") as f:
                 return f.read().strip()
-        # Try timedatectl (works on many Linux systems)
-        tz = subprocess.check_output(["timedatectl", "show", "-p", "Timezone"], text=True).strip()
+        # timedatectl is available on most modern systemd systems
+        tz = subprocess.check_output(
+            ["timedatectl", "show", "-p", "Timezone"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
         if "=" in tz:
             return tz.split("=", 1)[1]
+        if tz:
+            return tz
     except Exception:
         pass
-    # Fallback to UTC
     return "UTC"
+
 
 def get_location(config):
     """
-    Build an astral LocationInfo object from config values.
+    Build an astral ``LocationInfo`` object from config values.
 
-    Falls back to sensible defaults (New York City) for any missing keys.
-    The timezone defaults to the system timezone if not specified in config.
+    Falls back to sensible defaults (New York City coordinates) for any
+    missing keys. The timezone defaults to the system timezone when not
+    specified in config.
 
     Args:
         config (dict): Parsed configuration dictionary.
@@ -52,15 +90,13 @@ def get_location(config):
     Returns:
         LocationInfo: Location object used for sunrise/sunset calculations.
     """
-    # Fallbacks for missing config
     city = config.get("city", "MyCity")
     country = config.get("country", "MyCountry")
-    latitude = config.get("latitude", 40.7128)  # Default: NYC
+    latitude = config.get("latitude", 40.7128)   # Default: NYC
     longitude = config.get("longitude", -74.0060)
-    timezone = config.get("timezone")
-    if not timezone:
-        timezone = get_system_timezone()
+    timezone = config.get("timezone") or get_system_timezone()
     return LocationInfo(city, country, timezone, latitude, longitude)
+
 
 def local_to_utc_hm(hour, minute, tz_name):
     """
@@ -69,13 +105,18 @@ def local_to_utc_hm(hour, minute, tz_name):
     Handles DST transitions: non-existent times (spring-forward) use the DST
     interpretation; ambiguous times (fall-back) use standard time.
 
+    .. note::
+        This function is retained for reference but is **no longer used** in
+        the main scheduling flow. systemd ``OnCalendar=`` natively interprets
+        times in the system's local timezone, so no UTC conversion is needed.
+
     Args:
         hour (int): Local hour (0–23).
         minute (int): Local minute (0–59).
         tz_name (str): IANA timezone name (e.g. ``"America/New_York"``).
 
     Returns:
-        tuple[int, int]: (hour, minute) in UTC.
+        tuple[int, int]: ``(hour, minute)`` in UTC.
     """
     tz = pytz.timezone(tz_name)
     now = datetime.now(tz)
@@ -83,147 +124,478 @@ def local_to_utc_hm(hour, minute, tz_name):
     try:
         local_dt = tz.localize(naive_dt, is_dst=None)
     except pytz.exceptions.NonExistentTimeError:
-        # Clocks spring forward — this wall time doesn't exist; use DST side of the gap.
+        # Clocks spring forward — this wall time doesn't exist; use DST side.
         local_dt = tz.localize(naive_dt, is_dst=True)
     except pytz.exceptions.AmbiguousTimeError:
-        # Clocks fall back — time occurs twice; use standard-time (post-transition) side.
+        # Clocks fall back — time occurs twice; use standard-time side.
         local_dt = tz.localize(naive_dt, is_dst=False)
     utc_dt = local_dt.astimezone(pytz.utc)
     return utc_dt.hour, utc_dt.minute
 
-def get_sunset_cron_time(config):
+
+def get_sunset_local_time(config):
     """
-    Calculate today's sunset hour and minute (in UTC) for the configured location.
+    Calculate today's sunset hour and minute in the configured local timezone.
 
     Applies the optional ``sunset_offset_minutes`` config value as a positive
-    or negative offset from actual sunset.
+    or negative offset from the actual sunset time.
 
     Args:
         config (dict): Parsed configuration dictionary.
 
     Returns:
-        tuple[int, int]: (hour, minute) in UTC of the (optionally offset) sunset time.
-    """
-    loc = get_location(config)
-    s = sun(loc.observer, date=datetime.now().date(), tzinfo=pytz.timezone(loc.timezone))
-    sunset = s["sunset"]
-    sunset_time = sunset + timedelta(minutes=config.get("sunset_offset_minutes", 0))
-    sunset_utc = sunset_time.astimezone(pytz.utc)
-    return sunset_utc.hour, sunset_utc.minute
-
-def get_crontab():
-    """
-    Read and return the current user crontab as a list of lines.
-
-    Returns:
-        list[str]: Lines of the current crontab, or an empty list if none exists.
-    """
-    try:
-        output = subprocess.check_output(['crontab', '-l'], stderr=subprocess.DEVNULL, text=True)
-        return output.splitlines()
-    except subprocess.CalledProcessError:
-        return []
-
-def write_crontab(lines):
-    """
-    Write the given lines as the current user's crontab.
-
-    Args:
-        lines (list[str]): Crontab lines to write.
+        tuple[int, int]: ``(hour, minute)`` in local time of the (optionally
+        offset) sunset.
 
     Raises:
-        RuntimeError: If the ``crontab`` command exits with a non-zero return code.
+        ValueError: If the sun never sets at this location today (polar day/
+            night), which ``astral`` signals by raising ``ValueError``.
     """
-    cron_text = "\n".join(lines) + "\n"
-    result = subprocess.run(
-        ['crontab', '-'],
-        input=cron_text,
-        text=True,
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"crontab write failed with return code {result.returncode}: {result.stderr.strip()}"
-        )
+    loc = get_location(config)
+    tz_obj = pytz.timezone(loc.timezone)
+    # astral raises ValueError if the sun never sets (polar day/night)
+    s = sun(loc.observer, date=datetime.now().date(), tzinfo=tz_obj)
+    sunset = s["sunset"]
+    sunset_time = sunset + timedelta(minutes=config.get("sunset_offset_minutes", 0))
+    sunset_local = sunset_time.astimezone(tz_obj)
+    return sunset_local.hour, sunset_local.minute
 
-def build_cron_entry(minute, hour, command):
+
+# ---------------------------------------------------------------------------
+# Config / schedule helpers
+# ---------------------------------------------------------------------------
+
+def sanitise_name(name):
     """
-    Build a single cron entry string tagged with CRON_MARKER.
+    Validate and sanitise a schedule name for safe use in systemd unit filenames.
+
+    Replaces any character that is not alphanumeric, a hyphen, or an underscore
+    with a hyphen, then strips leading/trailing hyphens.
 
     Args:
-        minute (int): The minute field for the cron schedule (0–59).
-        hour (int): The hour field for the cron schedule (0–23).
-        command (str): The shell command to run.
+        name (str): Raw schedule name from config.
 
     Returns:
-        str: A complete cron line in the format ``M H * * * command # marker``.
+        str: Sanitised name safe for use as a systemd unit name suffix.
+
+    Raises:
+        ValueError: If *name* is empty or becomes empty after sanitisation.
     """
-    return f"{minute} {hour} * * * {command} {CRON_MARKER}"
+    if not name:
+        raise ValueError("Schedule name must not be empty.")
+    sanitised = re.sub(r"[^a-zA-Z0-9_-]", "-", str(name)).strip("-")
+    if not sanitised:
+        raise ValueError(
+            f"Schedule name {name!r} is empty or invalid after sanitisation "
+            "(only alphanumeric characters, hyphens, and underscores are allowed)."
+        )
+    return sanitised
+
+
+def resolve_schedules(config):
+    """
+    Return the list of schedule entries from config, with backward compatibility.
+
+    If ``schedules`` is absent but the legacy flat keys (``colors_url``,
+    ``taps_url``, ``colors_time``) are present, they are synthesised into a
+    ``schedules`` list and a deprecation warning is printed to ``stdout``.
+
+    Args:
+        config (dict): Parsed configuration dictionary.
+
+    Returns:
+        list[dict]: List of schedule entries, each containing ``"name"``,
+        ``"audio_url"``, and ``"time"`` keys.
+    """
+    if "schedules" in config:
+        return config["schedules"]
+
+    # Backward compatibility: synthesise from legacy flat keys
+    if "colors_url" in config or "taps_url" in config:
+        print(
+            "⚠️  DEPRECATION WARNING: 'colors_url', 'taps_url', and 'colors_time' are deprecated.\n"
+            "   Please migrate to the 'schedules' array format in config.json\n"
+            "   (re-run setup.sh → option 2 Reconfigure to auto-migrate)."
+        )
+        schedules = []
+        if "colors_url" in config:
+            schedules.append({
+                "name": "colors",
+                "audio_url": config["colors_url"],
+                "time": config.get("colors_time", "08:00"),
+            })
+        if "taps_url" in config:
+            schedules.append({
+                "name": "taps",
+                "audio_url": config["taps_url"],
+                "time": "sunset",
+            })
+        return schedules
+
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Systemd unit file builders
+# ---------------------------------------------------------------------------
+
+def _write_unit_file(path, content):
+    """
+    Atomically write *content* to a systemd unit file at *path*.
+
+    Writes to a temporary file in the same directory first, then uses
+    ``os.replace()`` for an atomic rename. This ensures that a power cut or
+    crash can never leave a half-written unit file that confuses systemd.
+
+    Args:
+        path (str): Destination path for the unit file.
+        content (str): Text content to write.
+
+    Raises:
+        OSError: If the write or rename fails (e.g. permission denied).
+    """
+    dir_path = os.path.dirname(path)
+    fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except Exception:
+        # Clean up the temp file on failure so it doesn't litter /etc/systemd/system/
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _build_service_unit(name, audio_url):
+    """
+    Return the content of a systemd ``.service`` unit that plays one audio file.
+
+    The unit uses ``Type=oneshot`` (correct for a short-lived script that exits
+    after playing), declares a dependency on network connectivity, and waits for
+    ``flag-audio-http.service`` (the HTTP audio server) to be up before starting.
+
+    Args:
+        name (str): Sanitised schedule name (used only in ``Description``).
+        audio_url (str): Full HTTP URL of the MP3 to play.
+
+    Returns:
+        str: Unit file content ready to be written to disk.
+    """
+    return (
+        "[Unit]\n"
+        f"Description=Flag Audio — play {name}\n"
+        "After=network-online.target flag-audio-http.service\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f'ExecStart={PYTHON_BIN} {SONOS_PLAY} "{audio_url}"\n'
+        "User=root\n"
+    )
+
+
+def _build_timer_unit(name, hour, minute):
+    """
+    Return the content of a systemd ``.timer`` unit that fires at a given local time.
+
+    ``Persistent=true`` ensures that a missed firing (e.g. because the Raspberry
+    Pi was off) is executed on the next boot. ``WantedBy=timers.target`` is
+    required so that ``systemctl enable`` works correctly.
+
+    systemd interprets ``OnCalendar=`` times in the system's local timezone
+    (configured via ``/etc/localtime`` or ``TZ``), so no UTC conversion is needed
+    as long as the system timezone is correctly set (which ``setup.sh`` ensures).
+
+    Args:
+        name (str): Sanitised schedule name (used only in ``Description``).
+        hour (int): Local hour to fire (0–23).
+        minute (int): Local minute to fire (0–59).
+
+    Returns:
+        str: Unit file content ready to be written to disk.
+    """
+    return (
+        "[Unit]\n"
+        f"Description=Flag Audio Timer — {name}\n"
+        "\n"
+        "[Timer]\n"
+        f"OnCalendar=*-*-* {hour:02d}:{minute:02d}:00\n"
+        "Persistent=true\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+
+
+def _build_reschedule_service():
+    """
+    Return the content of the ``flag-reschedule.service`` unit.
+
+    This service re-runs ``schedule_sonos.py`` daily to recalculate the
+    sunset time and rewrite any sunset-based timer files.
+
+    Returns:
+        str: Unit file content ready to be written to disk.
+    """
+    return (
+        "[Unit]\n"
+        "Description=Flag Audio — daily reschedule (recalculate sunset timers)\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart={PYTHON_BIN} {SCHEDULE_SCRIPT}\n"
+        "User=root\n"
+    )
+
+
+def _build_reschedule_timer():
+    """
+    Return the content of the ``flag-reschedule.timer`` unit.
+
+    Fires daily at 02:00 local time to recalculate sunset-based timers.
+    ``Persistent=true`` ensures recalculation happens after a Raspberry Pi
+    that was off at 02:00 boots up later in the day.
+
+    Returns:
+        str: Unit file content ready to be written to disk.
+    """
+    return (
+        "[Unit]\n"
+        "Description=Flag Audio Timer — daily reschedule at 02:00\n"
+        "\n"
+        "[Timer]\n"
+        "OnCalendar=*-*-* 02:00:00\n"
+        "Persistent=true\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Systemd management helpers
+# ---------------------------------------------------------------------------
+
+def _run_systemctl(*args):
+    """
+    Run a ``systemctl`` command and raise a clear error on failure.
+
+    Args:
+        *args (str): Arguments to pass to ``systemctl``
+            (e.g. ``"daemon-reload"`` or ``"enable", "--now", "flag-colors.timer"``).
+
+    Raises:
+        RuntimeError: If ``systemctl`` exits with a non-zero return code,
+            with the command, exit code, and captured stderr included in the
+            error message.
+    """
+    cmd = ["systemctl"] + list(args)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"systemctl {' '.join(args)} failed (exit {result.returncode}):\n"
+            f"{result.stderr.strip()}"
+        )
+
+
+def _clean_stale_units(current_names):
+    """
+    Disable and remove any ``flag-*.timer`` / ``flag-*.service`` unit files
+    that are no longer represented in the active schedule.
+
+    This handles the case where a schedule entry is removed from config.json —
+    the corresponding unit files are disabled, stopped, and deleted so they
+    do not continue to fire.
+
+    Reserved units (``flag-audio-http``, ``flag-reschedule``) are always
+    skipped.
+
+    Args:
+        current_names (set[str]): Set of sanitised schedule names that should
+            remain active (e.g. ``{"colors", "taps"}``).
+    """
+    for suffix in (".timer", ".service"):
+        pattern = os.path.join(SYSTEMD_DIR, f"flag-*{suffix}")
+        for unit_path in _glob.glob(pattern):
+            unit_file = os.path.basename(unit_path)
+            # Extract the inner name: "flag-colors.timer" → "colors"
+            inner_name = unit_file[len("flag-"):-len(suffix)]
+            if inner_name in _RESERVED_NAMES:
+                # Never touch reserved units (audio-http, reschedule)
+                continue
+            if inner_name not in current_names:
+                # Best-effort disable/stop before removal
+                subprocess.run(
+                    ["systemctl", "disable", "--now", unit_file],
+                    capture_output=True,
+                    text=True,
+                )
+                try:
+                    os.remove(unit_path)
+                    print(f"  🗑️  Removed stale unit: {unit_file}")
+                except OSError as exc:
+                    print(f"  ⚠️  Could not remove {unit_path}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 def main():
     """
-    Load config, calculate sunset, and write the three Sonos cron jobs.
+    Load config, generate systemd unit files for all schedules, and enable timers.
 
-    Replaces any existing flag_sonos_autogen cron entries with fresh ones:
-    Colors at the configured local time (default 08:00), Taps at today's
-    (offset) sunset, and a self-reschedule at 02:00 to recalculate sunset
-    the following day.  All times are converted to UTC before being written
-    to cron.
+    Steps:
+
+    1. Verify the process is running as root (required to write
+       ``/etc/systemd/system/``).
+    2. Load ``config.json`` and resolve the ``schedules`` list (with
+       backward-compatibility for the old flat-key format).
+    3. Validate and sanitise each schedule name; raise on duplicates.
+    4. For each schedule, compute the fire time (fixed HH:MM or today's
+       sunset in local time) and write a ``.service`` + ``.timer`` pair
+       atomically.
+    5. Write the ``flag-reschedule`` service/timer pair (daily at 02:00).
+    6. Remove any stale ``flag-*.timer`` / ``flag-*.service`` unit files that
+       are no longer in the current schedule list.
+    7. Run ``systemctl daemon-reload``; print a clear error and exit on failure.
+    8. Enable and start all new timers with ``systemctl enable --now``.
+    9. Print a summary of installed timers.
+
+    Raises:
+        SystemExit: On ``daemon-reload`` failure, duplicate schedule names,
+            or if the process is not running as root.
     """
+    # Require root so we can write to /etc/systemd/system/
+    if os.getuid() != 0:
+        sys.exit(
+            f"❌ schedule_sonos.py must be run as root (needs write access to {SYSTEMD_DIR}).\n"
+            f"   Try: sudo {sys.executable} {os.path.abspath(__file__)}"
+        )
+
     config = load_config()
-    colors_url = config["colors_url"]
-    taps_url = config["taps_url"]
     tz_name = config.get("timezone") or get_system_timezone()
 
-    # 1. Parse colors play time (local) and convert to UTC
-    colors_time_str = config.get("colors_time", "08:00")
-    colors_hour, colors_minute = map(int, colors_time_str.split(":"))
-    colors_hour_utc, colors_min_utc = local_to_utc_hm(colors_hour, colors_minute, tz_name)
+    schedules = resolve_schedules(config)
+    if not schedules:
+        print("⚠️  No schedules found in config.json. Nothing to schedule.")
+        return
 
-    # 2. Calculate sunset time for taps (returned in UTC)
-    sunset_hour, sunset_minute = get_sunset_cron_time(config)
+    # --- Validate names and check for duplicates ---
+    seen_names: set = set()
+    processed = []
+    for entry in schedules:
+        raw_name = entry.get("name", "")
+        name = sanitise_name(raw_name)   # raises ValueError if invalid
+        if name in seen_names:
+            raise ValueError(
+                f"Duplicate schedule name '{name}'. "
+                "Each schedule entry must have a unique name."
+            )
+        seen_names.add(name)
+        processed.append({
+            "name": name,
+            "audio_url": entry["audio_url"],
+            "time": entry["time"],
+        })
 
-    # 3. Convert reschedule time (02:00 local) to UTC
-    reschedule_hour_utc, reschedule_min_utc = local_to_utc_hm(2, 0, tz_name)
+    print("Writing systemd unit files...")
 
-    # 4. Compose commands
-    colors_cmd = f'{PYTHON_BIN} {SONOS_PLAY} "{colors_url}"'
-    taps_cmd = f'{PYTHON_BIN} {SONOS_PLAY} "{taps_url}"'
-    schedule_cmd = f'{PYTHON_BIN} {os.path.abspath(__file__)}'
+    # --- Generate a service + timer pair for each schedule entry ---
+    written_names: set = set()
+    for entry in processed:
+        name = entry["name"]
+        audio_url = entry["audio_url"]
+        time_str = entry["time"]
 
-    # 5. Prepare new flag_sonos_autogen crontab entries
-    new_cron = [
-        build_cron_entry(colors_min_utc, colors_hour_utc, colors_cmd),        # Colors
-        build_cron_entry(sunset_minute, sunset_hour, taps_cmd),                # Taps at sunset
-        build_cron_entry(reschedule_min_utc, reschedule_hour_utc, schedule_cmd),  # Reschedule
-    ]
+        # Resolve the fire time to (hour, minute) in local time
+        if time_str == "sunset":
+            try:
+                hour, minute = get_sunset_local_time(config)
+            except ValueError as exc:
+                # Polar day/night: the sun never sets — skip this timer
+                print(
+                    f"  ⚠️  Skipping '{name}': cannot compute sunset for today — {exc}"
+                )
+                continue
+        else:
+            try:
+                hour, minute = map(int, time_str.split(":"))
+            except (ValueError, AttributeError):
+                print(
+                    f"  ⚠️  Skipping '{name}': invalid time format '{time_str}' "
+                    "(expected HH:MM or 'sunset')"
+                )
+                continue
 
-    # 6. Read current crontab and strip out all old flag_sonos_autogen lines
-    cur_cron = get_crontab()
-    filtered = [line for line in cur_cron if CRON_MARKER not in line and line.strip() != '']
+        service_path = os.path.join(SYSTEMD_DIR, f"flag-{name}.service")
+        timer_path = os.path.join(SYSTEMD_DIR, f"flag-{name}.timer")
 
-    # 7. Add new lines
-    filtered += new_cron
+        # Atomic writes — if either raises, the exception propagates to the caller
+        _write_unit_file(service_path, _build_service_unit(name, audio_url))
+        _write_unit_file(timer_path, _build_timer_unit(name, hour, minute))
 
-    # 8. Write updated crontab
-    write_crontab(filtered)
+        written_names.add(name)
+        time_display = (
+            f"{hour:02d}:{minute:02d} {tz_name}" if time_str == "sunset"
+            else f"{time_str} {tz_name}"
+        )
+        print(
+            f"  ✅ {name}: scheduled at {time_display} "
+            f"(flag-{name}.timer → flag-{name}.service)"
+        )
 
-    # 9. Print result
-    print("Crontab updated with the following jobs:")
-    print(f"  Colors at {colors_hour:02d}:{colors_minute:02d} {tz_name} "
-          f"({colors_hour_utc:02d}:{colors_min_utc:02d} UTC) "
-          f"→ cron: {colors_min_utc} {colors_hour_utc} * * *")
-    # Convert sunset UTC back to local time for display
-    tz_obj = pytz.timezone(tz_name)
-    today = datetime.now(tz_obj).date()
-    sunset_utc_dt = pytz.utc.localize(datetime(today.year, today.month, today.day, sunset_hour, sunset_minute))
-    sunset_local_dt = sunset_utc_dt.astimezone(tz_obj)
-    print(f"  Taps at sunset ({sunset_local_dt.hour:02d}:{sunset_local_dt.minute:02d} {tz_name} / "
-          f"{sunset_hour:02d}:{sunset_minute:02d} UTC) "
-          f"→ cron: {sunset_minute} {sunset_hour} * * *")
-    print(f"  Reschedule at 02:00 {tz_name} "
-          f"({reschedule_hour_utc:02d}:{reschedule_min_utc:02d} UTC) "
-          f"→ cron: {reschedule_min_utc} {reschedule_hour_utc} * * *")
+    # --- Write the daily reschedule service/timer pair ---
+    _write_unit_file(
+        os.path.join(SYSTEMD_DIR, "flag-reschedule.service"),
+        _build_reschedule_service(),
+    )
+    _write_unit_file(
+        os.path.join(SYSTEMD_DIR, "flag-reschedule.timer"),
+        _build_reschedule_timer(),
+    )
+    print(
+        "  ✅ Reschedule: daily timer at 02:00 local time "
+        "(flag-reschedule.timer → flag-reschedule.service)"
+    )
+
+    # --- Remove stale unit files from previous runs ---
+    _clean_stale_units(written_names)
+
+    # --- Reload systemd daemon so it picks up the new/changed unit files ---
+    # All unit files must be written before daemon-reload and enable steps.
+    try:
+        _run_systemctl("daemon-reload")
+    except RuntimeError as exc:
+        print(f"\n  ❌ daemon-reload failed — check unit file syntax:\n  {exc}")
+        sys.exit(1)
+
+    # --- Enable and start all timers ---
+    # Order matters: daemon-reload must have completed before enabling.
+    timers_to_enable = [f"flag-{name}.timer" for name in sorted(written_names)]
+    timers_to_enable.append("flag-reschedule.timer")
+    for timer in timers_to_enable:
+        try:
+            _run_systemctl("enable", "--now", timer)
+            print(f"  ✅ Enabled and started: {timer}")
+        except RuntimeError as exc:
+            print(f"  ⚠️  Could not enable {timer}: {exc}")
+
+    # --- Summary ---
+    print("")
+    print("Installed systemd timers:")
+    for name in sorted(written_names):
+        print(f"  flag-{name}.timer  →  flag-{name}.service")
+    print("  flag-reschedule.timer  →  flag-reschedule.service")
+    print("")
+    print("To verify:   systemctl list-timers --all | grep flag")
+    print("To inspect:  journalctl -u flag-colors -n 50")
+
 
 if __name__ == "__main__":
     main()
