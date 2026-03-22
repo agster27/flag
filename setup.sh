@@ -178,9 +178,14 @@ function configure_setup() {
     # Preferred: use the IP that the kernel would route toward the Sonos speaker
     local_ip=""
     if [ -n "$SONOS_IP" ]; then
+        # 'ip route get <dst>' outputs a line containing "src <local-ip>"; extract that token
         local_ip=$(ip route get "$SONOS_IP" 2>/dev/null \
             | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' \
             | head -1)
+        # Discard the result if it doesn't look like an IPv4 address
+        if [[ ! "$local_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            local_ip=""
+        fi
     fi
     # Fallback: first non-loopback IP from hostname -I
     if [ -z "$local_ip" ]; then
