@@ -8,7 +8,7 @@
 set -e
 set -o pipefail
 
-SETUP_VERSION="1.6.0"
+SETUP_VERSION="2.0.0"
 
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"
@@ -35,7 +35,9 @@ function log() {
 }
 
 # ---------------------------------------------------------------------------
-# Read an existing config value (if config already exists) as default
+# Read an existing config value (if config already exists) as default.
+# Uses jq dot-notation for the key, e.g. cfg_default "port" "8000"
+# or cfg_default "schedules[0].name" "colors".
 # ---------------------------------------------------------------------------
 function cfg_default() {
     local key="$1" fallback="$2"
@@ -48,7 +50,8 @@ function cfg_default() {
 }
 
 # ---------------------------------------------------------------------------
-# Write (or rewrite) the systemd service file using the current $PORT value.
+# Write (or rewrite) the systemd service file for the audio HTTP server.
+# Uses the current $PORT value.
 # ---------------------------------------------------------------------------
 function write_service_file() {
     log "⚙️  Writing systemd service for audio HTTP server (port $PORT)..."
@@ -142,7 +145,7 @@ PYEOF
 }
 
 # ---------------------------------------------------------------------------
-# Interactive configuration wizard
+# Interactive configuration wizard.
 # Writes $CONFIG_FILE with user-supplied (or defaulted) values.
 # ---------------------------------------------------------------------------
 function configure_setup() {
@@ -152,6 +155,12 @@ function configure_setup() {
     echo "============================================"
     echo "Press Enter to accept the value shown in [brackets]."
     echo ""
+
+    # Ensure jq is available — needed to read/write config and build JSON
+    if ! command -v jq &>/dev/null; then
+        echo "  ⚠️  'jq' not found. Installing..."
+        maybe_sudo apt-get install -y jq
+    fi
 
     # Sonos IP — try auto-discovery first
     default_ip=$(cfg_default "sonos_ip" "")
@@ -173,8 +182,8 @@ function configure_setup() {
         echo "  ⚠️  Please enter a valid port number (1–65535)."
     done
 
-    # Hostname / IP this machine is reachable at
-    # Preferred: find a local IP on the same /24 subnet as the Sonos speaker
+    # Hostname / IP this machine is reachable at.
+    # Preferred: find a local IP on the same /24 subnet as the Sonos speaker.
     local_ip=""
     if [ -n "$SONOS_IP" ]; then
         sonos_prefix=$(echo "$SONOS_IP" | cut -d. -f1-3)
@@ -199,18 +208,26 @@ function configure_setup() {
     if [ -z "$local_ip" ]; then
         local_ip=$(hostname -I | awk '{print $1}')
     fi
-    # Hostname / IP default: prefer detected local_ip, fall back to existing config
+
+    # Hostname / IP default: prefer detected local_ip, then fall back to existing config
     if [ -n "$local_ip" ]; then
         default_host="$local_ip"
     else
-        default_host=$(cfg_default "colors_url" "http://localhost:${default_port}/colors.mp3" \
-            | sed 's|http://||;s|:.*||')
+        # Try first schedule's audio_url (new format) or legacy colors_url
+        if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
+            _first_url=$(jq -r '(.schedules[0].audio_url // .colors_url // "") | select(. != "null")' \
+                "$CONFIG_FILE" 2>/dev/null || echo "")
+            if [ -n "$_first_url" ] && [ "$_first_url" != "null" ]; then
+                default_host=$(echo "$_first_url" | sed 's|http://||;s|:.*||')
+            else
+                default_host="localhost"
+            fi
+        else
+            default_host="localhost"
+        fi
     fi
     read -rp "  Hostname or IP of THIS machine (for audio URLs) [${default_host}]: " INPUT
     HOST_ADDR="${INPUT:-$default_host}"
-
-    COLORS_URL="http://${HOST_ADDR}:${PORT}/colors.mp3"
-    TAPS_URL="http://${HOST_ADDR}:${PORT}/taps.mp3"
 
     # Volume
     default_vol=$(cfg_default "volume" "30")
@@ -280,7 +297,7 @@ function configure_setup() {
     echo ""
     echo "  Current system timezone: $current_sys_tz"
     if [ "$current_sys_tz" != "$TIMEZONE" ]; then
-        read -rp "  Set system timezone to '$TIMEZONE' so cron fires at the right local time? [Y/n]: " SYS_TZ_INPUT
+        read -rp "  Set system timezone to '$TIMEZONE' so systemd timers fire at the right local time? [Y/n]: " SYS_TZ_INPUT
         SYS_TZ_INPUT="${SYS_TZ_INPUT:-y}"
         if [[ "${SYS_TZ_INPUT,,}" == "y" ]]; then
             maybe_sudo timedatectl set-timezone "$TIMEZONE" \
@@ -292,40 +309,156 @@ function configure_setup() {
     fi
     echo ""
 
-    # Colors play time
-    default_colors_time=$(cfg_default "colors_time" "08:00")
-    while true; do
-        read -rp "  Colors play time (HH:MM, 24h, local time) [${default_colors_time}]: " INPUT
-        COLORS_TIME="${INPUT:-$default_colors_time}"
-        if [[ "$COLORS_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
-            break
-        fi
-        echo "  ⚠️  Please enter a valid time in HH:MM format (e.g. 08:00)."
-    done
-
     # Sunset offset
     default_offset=$(cfg_default "sunset_offset_minutes" "0")
-    read -rp "  Sunset offset minutes [${default_offset}]: " INPUT
-    SUNSET_OFFSET="${INPUT:-$default_offset}"
+    while true; do
+        read -rp "  Sunset offset minutes (negative = before sunset, e.g. -10) [${default_offset}]: " INPUT
+        SUNSET_OFFSET="${INPUT:-$default_offset}"
+        if [[ "$SUNSET_OFFSET" =~ ^-?[0-9]+$ ]]; then
+            break
+        fi
+        echo "  ⚠️  Please enter an integer (e.g. 0, -15, 30)."
+    done
 
+    # ---- Scheduled Audio Plays ----
+    echo ""
+    echo "  === Scheduled Audio Plays ==="
+    echo "  Configure which audio files to play and when."
+    echo "  Time: HH:MM (24-hour local time) or 'sunset'."
+    echo ""
+
+    # Load existing schedules into parallel arrays.
+    # If upgrading from the old flat-key format, pre-populate from those keys.
+    declare -a _snames _sfiles _stimes
+    _scount=0
+
+    if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
+        _new_count=$(jq '.schedules | length // 0' "$CONFIG_FILE" 2>/dev/null || echo "0")
+        if [ "${_new_count:-0}" -gt 0 ]; then
+            echo "  Found ${_new_count} existing schedule(s):"
+            for (( _i=0; _i<_new_count; _i++ )); do
+                _snames[$_scount]=$(jq -r ".schedules[${_i}].name" "$CONFIG_FILE")
+                # Extract just the filename portion of the audio_url
+                _sfiles[$_scount]=$(jq -r ".schedules[${_i}].audio_url" "$CONFIG_FILE" | sed 's|.*/||')
+                _stimes[$_scount]=$(jq -r ".schedules[${_i}].time" "$CONFIG_FILE")
+                echo "    $(( _scount + 1 )). name='${_snames[$_scount]}'  file='${_sfiles[$_scount]}'  time='${_stimes[$_scount]}'"
+                (( _scount++ ))
+            done
+            echo ""
+            read -rp "  Keep all existing schedules? [Y/n]: " _keep
+            _keep="${_keep:-y}"
+            if [[ "${_keep,,}" == "n" ]]; then
+                # Start fresh with defaults
+                _snames=(); _sfiles=(); _stimes=(); _scount=0
+                echo "  Starting fresh with default schedules (colors + taps)."
+                _snames[0]="colors"; _sfiles[0]="colors.mp3"; _stimes[0]="08:00"
+                _snames[1]="taps";   _sfiles[1]="taps.mp3";   _stimes[1]="sunset"
+                _scount=2
+            fi
+        elif jq -e '.colors_url' "$CONFIG_FILE" &>/dev/null 2>&1; then
+            # Old flat config — auto-migrate to the new schedules format
+            echo "  ⚠️  Upgrading from legacy config format (colors_url / taps_url)."
+            echo "  Pre-populating schedules from your existing settings."
+            _snames[0]="colors"
+            _sfiles[0]=$(jq -r '.colors_url // ""' "$CONFIG_FILE" | sed 's|.*/||')
+            _stimes[0]=$(jq -r '.colors_time // "08:00"' "$CONFIG_FILE")
+            _snames[1]="taps"
+            _sfiles[1]=$(jq -r '.taps_url // ""' "$CONFIG_FILE" | sed 's|.*/||')
+            _stimes[1]="sunset"
+            _scount=2
+            echo "  Pre-populated: colors (${_stimes[0]}), taps (sunset)"
+        else
+            # No existing schedules — use defaults
+            _snames[0]="colors"; _sfiles[0]="colors.mp3"; _stimes[0]="08:00"
+            _snames[1]="taps";   _sfiles[1]="taps.mp3";   _stimes[1]="sunset"
+            _scount=2
+        fi
+    else
+        # No config file yet — use defaults
+        _snames[0]="colors"; _sfiles[0]="colors.mp3"; _stimes[0]="08:00"
+        _snames[1]="taps";   _sfiles[1]="taps.mp3";   _stimes[1]="sunset"
+        _scount=2
+    fi
+
+    # Prompt to add additional scheduled plays
+    while true; do
+        echo ""
+        read -rp "  Add another scheduled play? [y/N]: " _add
+        _add="${_add:-n}"
+        [[ "${_add,,}" == "y" ]] || break
+
+        while true; do
+            read -rp "    Name (letters, numbers, hyphens, underscores only): " _new_name
+            if [[ "$_new_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+                break
+            fi
+            echo "    ⚠️  Invalid name. Use only letters, numbers, hyphens, and underscores."
+        done
+
+        read -rp "    Audio filename (e.g. bugle.mp3): " _new_file
+        _new_file="${_new_file:-bugle.mp3}"
+
+        while true; do
+            read -rp "    Play time (HH:MM or 'sunset'): " _new_time
+            if [[ "$_new_time" == "sunset" ]] || \
+               [[ "$_new_time" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+                break
+            fi
+            echo "    ⚠️  Enter a valid time (HH:MM, e.g. 17:00) or 'sunset'."
+        done
+
+        _snames[$_scount]="$_new_name"
+        _sfiles[$_scount]="$_new_file"
+        _stimes[$_scount]="$_new_time"
+        echo "    ✅ Added: name='$_new_name'  file='$_new_file'  time='$_new_time'"
+        (( _scount++ ))
+    done
+
+    # Safety net: if no schedules ended up configured, restore defaults
+    if [ "$_scount" -eq 0 ]; then
+        echo "  ⚠️  No schedules configured. Falling back to defaults (colors + taps)."
+        _snames[0]="colors"; _sfiles[0]="colors.mp3"; _stimes[0]="08:00"
+        _snames[1]="taps";   _sfiles[1]="taps.mp3";   _stimes[1]="sunset"
+        _scount=2
+    fi
+
+    # Build the schedules JSON array using jq for proper encoding
+    SCHEDULES_JSON="[]"
+    for (( i=0; i<_scount; i++ )); do
+        _audio_url="http://${HOST_ADDR}:${PORT}/${_sfiles[$i]}"
+        SCHEDULES_JSON=$(printf '%s' "$SCHEDULES_JSON" | jq \
+            --arg name  "${_snames[$i]}" \
+            --arg url   "$_audio_url" \
+            --arg time  "${_stimes[$i]}" \
+            '. + [{"name": $name, "audio_url": $url, "time": $time}]')
+    done
+
+    # Write the complete config.json using jq for correct JSON encoding
     echo ""
     echo "  Writing config to $CONFIG_FILE ..."
-    cat > "$CONFIG_FILE" <<EOF
-{
-  "sonos_ip": "$SONOS_IP",
-  "port": $PORT,
-  "volume": $VOLUME,
-  "colors_url": "$COLORS_URL",
-  "taps_url": "$TAPS_URL",
-  "default_wait_seconds": $WAIT_SECS,
-  "skip_restore_if_idle": $SKIP_RESTORE,
-  "latitude": $LATITUDE,
-  "longitude": $LONGITUDE,
-  "timezone": "$TIMEZONE",
-  "colors_time": "$COLORS_TIME",
-  "sunset_offset_minutes": $SUNSET_OFFSET
-}
-EOF
+    jq -n \
+        --arg      sonos_ip        "$SONOS_IP" \
+        --argjson  port            "$PORT" \
+        --argjson  volume          "$VOLUME" \
+        --argjson  wait            "$WAIT_SECS" \
+        --argjson  skip_restore    "$SKIP_RESTORE" \
+        --argjson  lat             "$LATITUDE" \
+        --argjson  lon             "$LONGITUDE" \
+        --arg      tz              "$TIMEZONE" \
+        --argjson  offset          "$SUNSET_OFFSET" \
+        --argjson  schedules       "$SCHEDULES_JSON" \
+        '{
+          "sonos_ip":              $sonos_ip,
+          "port":                  $port,
+          "volume":                $volume,
+          "default_wait_seconds":  $wait,
+          "skip_restore_if_idle":  $skip_restore,
+          "latitude":              $lat,
+          "longitude":             $lon,
+          "timezone":              $tz,
+          "sunset_offset_minutes": $offset,
+          "schedules":             $schedules
+        }' > "$CONFIG_FILE"
     log "✅ config.json written."
 }
 
@@ -356,7 +489,8 @@ function test_sonos_playback() {
         return
     fi
 
-    TEST_URL=$(jq -r '.colors_url' "$CONFIG_FILE")
+    # Use the first schedule's audio_url (new format) or fall back to legacy colors_url
+    TEST_URL=$(jq -r '(.schedules[0].audio_url // .colors_url // "")' "$CONFIG_FILE")
     echo ""
     echo "  🔊 Playing test sound on $SONOS_IP ..."
     echo "     URL: $TEST_URL"
@@ -396,21 +530,36 @@ function prompt_menu() {
 
 function uninstall_all() {
     echo ""
-    read -rp "  ⚠️  This will permanently remove all files, cron jobs, and the systemd service. Are you sure? [y/N]: " CONFIRM
+    read -rp "  ⚠️  This will permanently remove all files and systemd services/timers. Are you sure? [y/N]: " CONFIRM
     if [[ "${CONFIRM,,}" != "y" ]]; then
         echo "  Uninstall cancelled."
         return
     fi
     log "🚨 Uninstalling Honor Tradition with Tech..."
-    TMPCRON=$(mktemp)
-    crontab -l 2>/dev/null | grep -v "$INSTALL_DIR" > "$TMPCRON" || true
-    crontab "$TMPCRON" || true
-    rm -f "$TMPCRON"
-    maybe_sudo systemctl disable --now flag-audio-http 2>/dev/null || true
-    maybe_sudo rm -f /etc/systemd/system/flag-audio-http.service
+
+    # Disable and stop all flag-related timers first.
+    # Iterate over found files individually rather than relying on shell glob
+    # expansion in systemctl arguments, so the loop is safe when no files exist.
+    for timer_file in /etc/systemd/system/flag-*.timer; do
+        [ -f "$timer_file" ] || continue
+        timer_unit=$(basename "$timer_file")
+        maybe_sudo systemctl disable --now "$timer_unit" 2>/dev/null || true
+    done
+
+    # Disable and stop all flag-related services
+    for service_file in /etc/systemd/system/flag-*.service; do
+        [ -f "$service_file" ] || continue
+        service_unit=$(basename "$service_file")
+        maybe_sudo systemctl disable --now "$service_unit" 2>/dev/null || true
+    done
+
+    # Remove all flag unit files and reload systemd
+    maybe_sudo rm -f /etc/systemd/system/flag-*.timer
+    maybe_sudo rm -f /etc/systemd/system/flag-*.service
     maybe_sudo systemctl daemon-reload
+
     maybe_sudo rm -rf "$INSTALL_DIR"
-    echo "✅ All files and cron jobs removed!"
+    echo "✅ All files, systemd timers, and services removed!"
     exit 0
 }
 
@@ -502,10 +651,11 @@ EOF
     log "🔄 Restarting audio HTTP server..."
     maybe_sudo systemctl restart flag-audio-http
 
-    log "🗓️  Running schedule_sonos.py to set up Sonos schedule crontab..."
-    source "$VENV_DIR/bin/activate"
-    "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
-    deactivate
+    # Generate systemd timer units for all schedules.
+    # All unit files are written first, then daemon-reload, then enable — as
+    # required to avoid set -e failures from enabling before files exist.
+    log "🗓️  Running schedule_sonos.py to install systemd timers..."
+    maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
 
     log "🏁 Setup complete."
     log ""
@@ -515,8 +665,15 @@ EOF
     log "To test Sonos playback manually, run:"
     log "  $VENV_DIR/bin/python $INSTALL_DIR/sonos_play.py"
     log ""
-    log "Check status of audio server:"
+    log "Check status of the audio server:"
     log "  sudo systemctl status flag-audio-http"
+    log ""
+    log "Check active timers:"
+    log "  systemctl list-timers --all | grep flag"
+    log ""
+    log "View playback logs:"
+    log "  journalctl -u flag-colors -n 50"
+    log "  journalctl -u flag-taps -n 50"
     log ""
     log "Edit your config at any time: $INSTALL_DIR/config.json"
     log "Or re-run this script and choose option 2 (Reconfigure)."
@@ -536,6 +693,13 @@ case $CHOICE in
         write_service_file
         maybe_sudo systemctl enable flag-audio-http
         maybe_sudo systemctl restart flag-audio-http 2>/dev/null || true
+        # Regenerate systemd timer units with the updated config
+        if [ -d "$VENV_DIR" ]; then
+            log "🗓️  Regenerating systemd timer units..."
+            maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
+        else
+            log "⚠️  Python venv not found. Run option 1 (Install) to create systemd timers."
+        fi
         log "✅ Reconfiguration complete."
         ;;
     3)

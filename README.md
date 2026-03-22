@@ -12,6 +12,8 @@
 📄 Log every playback to `/opt/flag/sonos_play.log`  
 📡 Serve your MP3s via a **tiny HTTP server**  
 ⚙️ Customize everything via `/opt/flag/config.json`  
+🖥️ Scheduled via **systemd timers** — better logging, auto-retry, and `Persistent=true` boot resilience (critical for Raspberry Pi)  
+🎵 **Extensible schedules** — add any number of scheduled plays by editing `config.json`, no code changes needed  
 
 ---
 
@@ -19,7 +21,7 @@
 
 - 🐍 Python 3.8+
 - 📶 Sonos speaker on the local network
-- 🖥️ Ubuntu/Debian VM or LXC container (Proxmox-ready)
+- 🖥️ Ubuntu/Debian VM, LXC container, or **Raspberry Pi** (systemd required)
 - 🎧 Your own `colors.mp3` and `taps.mp3` in `/opt/flag/audio/`
 
 ---
@@ -34,10 +36,12 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-**You will be prompted with:**
-1. Update/install the latest scripts (recommended for first install or upgrades)
-2. Uninstall completely (removes all files and cron jobs)
-3. Exit without doing anything
+**You will be prompted with a menu:**
+1. Install / update to the latest scripts (recommended for first install or upgrades)
+2. Reconfigure (edit config.json interactively)
+3. Test Sonos playback
+4. Uninstall completely
+5. Exit without doing anything
 
 > The script will automatically download all required files from GitHub using wget (no `git clone` needed), create a Python virtual environment, install dependencies, and generate a default `config.json` if needed.
 
@@ -50,7 +54,7 @@ After setup, your `/opt/flag/` folder should look like:
 ```
 /opt/flag/
 ├── sonos_play.py          # Plays the MP3 on Sonos
-├── schedule_sonos.py      # Calculates sunset and writes cron jobs
+├── schedule_sonos.py      # Calculates sunset and writes systemd timer unit files
 ├── audio_check.py         # Validates and converts audio files
 ├── config.py              # Central configuration loader
 ├── README.md              # Project readme (downloaded for reference)
@@ -62,6 +66,15 @@ After setup, your `/opt/flag/` folder should look like:
 └── audio/
     ├── colors.mp3         # 🎶 Morning bugle call (add your own)
     └── taps.mp3           # 🌅 Evening taps (add your own)
+```
+
+**Systemd unit files** (written by `schedule_sonos.py` to `/etc/systemd/system/`):
+
+```
+flag-colors.service / flag-colors.timer       # Colors at 08:00
+flag-taps.service   / flag-taps.timer         # Taps at sunset (updated daily)
+flag-reschedule.service / flag-reschedule.timer  # Daily 02:00 — recalculates sunset
+flag-audio-http.service                       # HTTP audio file server
 ```
 
 ---
@@ -92,29 +105,84 @@ Edit `/opt/flag/config.json` to match your Sonos and preferences:
 ```json
 {
   "sonos_ip": "192.168.1.50",
+  "port": 8000,
   "volume": 30,
-  "colors_url": "http://flag.aghy.home:8000/colors.mp3",
-  "taps_url": "http://flag.aghy.home:8000/taps.mp3",
   "default_wait_seconds": 60,
   "skip_restore_if_idle": true,
   "latitude": 42.1,
   "longitude": -71.5,
   "timezone": "America/New_York",
-  "sunset_offset_minutes": 0
+  "sunset_offset_minutes": 0,
+  "schedules": [
+    {
+      "name": "colors",
+      "audio_url": "http://192.168.1.10:8000/colors.mp3",
+      "time": "08:00"
+    },
+    {
+      "name": "taps",
+      "audio_url": "http://192.168.1.10:8000/taps.mp3",
+      "time": "sunset"
+    }
+  ]
 }
 ```
+
+### Top-level keys
 
 | Key | Description |
 |-----|-------------|
 | `sonos_ip` | IP address of your Sonos speaker |
+| `port` | Port the HTTP audio server listens on (default: `8000`) |
 | `volume` | Playback volume (0–100) |
-| `colors_url` | URL of the Colors MP3 served by the HTTP server |
-| `taps_url` | URL of the Taps MP3 served by the HTTP server |
 | `default_wait_seconds` | Fallback wait time (seconds) if MP3 duration cannot be determined |
 | `skip_restore_if_idle` | If `true`, do not restore prior playback when speaker was idle |
 | `latitude` / `longitude` | Your coordinates, used to calculate local sunset time |
 | `timezone` | IANA timezone name (e.g. `"America/New_York"`) |
 | `sunset_offset_minutes` | Optional offset in minutes from sunset (negative = before, positive = after). Defaults to `0` |
+
+### `schedules` array
+
+Each entry in `schedules` defines one scheduled audio play:
+
+| Field | Description |
+|-------|-------------|
+| `name` | Unique name used as the systemd unit suffix (`flag-{name}.service` / `flag-{name}.timer`). Must contain only letters, numbers, hyphens, and underscores. |
+| `audio_url` | Full HTTP URL of the MP3 to play (served by the built-in audio HTTP server). |
+| `time` | When to play: either `"HH:MM"` (24-hour local time) or the special value `"sunset"`. |
+
+> **Backward compatibility:** If you have an older install that still uses the flat `colors_url` / `taps_url` / `colors_time` keys, `schedule_sonos.py` will automatically synthesise a schedules list from them and print a deprecation warning. Re-run `setup.sh` → option 2 (Reconfigure) to permanently migrate to the new format.
+
+---
+
+## ➕ Adding a New Scheduled Play
+
+To add a new scheduled audio play (e.g., a 17:00 retreat call):
+
+1. **Add an audio file** to `/opt/flag/audio/` (e.g., `retreat.mp3`)
+
+2. **Edit `/opt/flag/config.json`** and add an entry to the `schedules` array:
+
+   ```json
+   {
+     "name": "retreat",
+     "audio_url": "http://192.168.1.10:8000/retreat.mp3",
+     "time": "17:00"
+   }
+   ```
+
+3. **Re-run setup.sh** and choose option **2 (Reconfigure)**, or run:
+
+   ```bash
+   sudo /opt/flag/sonos-env/bin/python /opt/flag/schedule_sonos.py
+   ```
+
+4. Verify the new timer is active:
+
+   ```bash
+   systemctl list-timers --all | grep flag
+   ```
+
 ---
 
 ## 🧪 Testing
@@ -131,7 +199,6 @@ curl -I http://localhost:8000/taps.mp3
 ```
 
 You should see `HTTP/1.0 200 OK` in the response headers.
-You can also test in your browser: [http://flag.aghy.home:8000/colors.mp3](http://flag.aghy.home:8000/colors.mp3)
 
 ### 2. Test Sonos Playback Manually
 
@@ -149,21 +216,29 @@ or, for taps:
 
 If it works, you'll hear the audio play on your Sonos and see log output in `/opt/flag/sonos_play.log`.
 
-### 3. Test Scheduling
+### 3. Check Installed Timers
 
-- Check that the cron jobs are installed:
+Verify all timers were installed and show their next fire times:
 
-  ```bash
-  crontab -l
-  ```
+```bash
+systemctl list-timers --all | grep flag
+```
 
-- You should see entries for the morning and sunset calls.
+You should see entries for each schedule (`flag-colors`, `flag-taps`) and the daily reschedule (`flag-reschedule`).
 
-- To test scheduling, you can temporarily edit the crontab to run a minute in the future and observe playback.
+### 4. View Timer Logs
 
-### 4. Check Logs
+Check journal logs for a specific timer/service:
 
-Review the log file for any errors or confirmations:
+```bash
+journalctl -u flag-colors -n 50
+journalctl -u flag-taps -n 50
+journalctl -u flag-reschedule -n 20
+```
+
+### 5. Check General Logs
+
+Review the setup/playback log file for errors or confirmations:
 
 ```bash
 cat /opt/flag/sonos_play.log
@@ -175,12 +250,21 @@ cat /opt/flag/sonos_play.log
 
 - **Check audio server:**  
   `sudo systemctl status flag-audio-http`
-- **Check logs:**  
+- **Check a specific timer status:**  
+  `systemctl status flag-colors.timer`  
+  `systemctl status flag-taps.timer`
+- **Check logs for a service:**  
+  `journalctl -u flag-colors -n 50`  
+  `journalctl -u flag-taps -n 50`
+- **List all flag timers and their next fire time:**  
+  `systemctl list-timers --all | grep flag`
+- **Check playback log:**  
   `cat /opt/flag/sonos_play.log`
-- **Check crontab:**  
-  `crontab -l`
-- **Test playback manually:**  
-  See the section above on manual testing.
+- **Manually trigger a play (for testing):**  
+  `sudo systemctl start flag-colors.service`
+- **Sunset timer shows the wrong time?**  
+  The `flag-reschedule` timer recalculates sunset at 02:00 each night. To recalculate immediately:  
+  `sudo /opt/flag/sonos-env/bin/python /opt/flag/schedule_sonos.py`
 
 ---
 
