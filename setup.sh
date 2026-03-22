@@ -76,6 +76,10 @@ EOF
 # Requires the Python venv (with soco installed) to already exist.
 # ---------------------------------------------------------------------------
 function discover_sonos_ip() {
+    if [ ! -d "$VENV_DIR" ]; then
+        SONOS_IP=""
+        return
+    fi
     log "🔍 Scanning network for Sonos speakers..."
     # Use tab as delimiter to avoid conflicts with speaker names that may contain '|'
     DISCOVERED=$("$VENV_DIR/bin/python" - <<'PYEOF'
@@ -299,7 +303,11 @@ function test_sonos_playback() {
     echo ""
 
     TMPCONFIG=$(mktemp --suffix=.json) || { echo "  ❌ Failed to create temp file."; return 1; }
-    jq --arg ip "$SONOS_IP" '.sonos_ip = $ip' "$CONFIG_FILE" > "$TMPCONFIG"
+    if ! jq --arg ip "$SONOS_IP" '.sonos_ip = $ip' "$CONFIG_FILE" > "$TMPCONFIG"; then
+        rm -f "$TMPCONFIG"
+        echo "  ❌ Failed to build test config. Check $CONFIG_FILE."
+        return 1
+    fi
 
     FLAG_CONFIG="$TMPCONFIG" "$VENV_DIR/bin/python" "$INSTALL_DIR/sonos_play.py" "$TEST_URL"
     PLAY_EXIT=$?
