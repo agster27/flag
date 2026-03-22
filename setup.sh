@@ -18,8 +18,16 @@ LOG_FILE="$INSTALL_DIR/setup.log"
 REQUIREMENTS_TXT="$INSTALL_DIR/requirements.txt"
 CONFIG_FILE="$INSTALL_DIR/config.json"
 
-sudo mkdir -p "$INSTALL_DIR"
-sudo chown "$(whoami)" "$INSTALL_DIR"
+function maybe_sudo() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+maybe_sudo mkdir -p "$INSTALL_DIR"
+maybe_sudo chown "$(whoami)" "$INSTALL_DIR"
 touch "$LOG_FILE"
 
 function log() {
@@ -44,7 +52,7 @@ function cfg_default() {
 # ---------------------------------------------------------------------------
 function write_service_file() {
     log "⚙️  Writing systemd service for audio HTTP server (port $PORT)..."
-    sudo tee /etc/systemd/system/flag-audio-http.service > /dev/null <<EOF
+    maybe_sudo tee /etc/systemd/system/flag-audio-http.service > /dev/null <<EOF
 [Unit]
 Description=Flag Audio HTTP Server
 After=network.target
@@ -59,7 +67,7 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF
-    sudo systemctl daemon-reload
+    maybe_sudo systemctl daemon-reload
 }
 
 # ---------------------------------------------------------------------------
@@ -204,10 +212,10 @@ function uninstall_all() {
     crontab -l 2>/dev/null | grep -v "$INSTALL_DIR" > "$TMPCRON" || true
     crontab "$TMPCRON" || true
     rm -f "$TMPCRON"
-    sudo systemctl disable --now flag-audio-http 2>/dev/null || true
-    sudo rm -f /etc/systemd/system/flag-audio-http.service
-    sudo systemctl daemon-reload
-    sudo rm -rf "$INSTALL_DIR"
+    maybe_sudo systemctl disable --now flag-audio-http 2>/dev/null || true
+    maybe_sudo rm -f /etc/systemd/system/flag-audio-http.service
+    maybe_sudo systemctl daemon-reload
+    maybe_sudo rm -rf "$INSTALL_DIR"
     log "✅ All files and cron jobs removed!"
     exit 0
 }
@@ -223,14 +231,14 @@ function update_or_install() {
     PORT=$(jq -r '.port' "$CONFIG_FILE")
 
     log "📦 Installing system dependencies..."
-    sudo apt update | tee -a "$LOG_FILE"
-    sudo apt install -y python3-full python3-venv ffmpeg jq wget | tee -a "$LOG_FILE"
+    maybe_sudo apt update | tee -a "$LOG_FILE"
+    maybe_sudo apt install -y python3-full python3-venv ffmpeg jq wget | tee -a "$LOG_FILE"
 
     log "📁 Creating $AUDIO_DIR..."
-    sudo mkdir -p "$AUDIO_DIR"
-    sudo chown "$(whoami)" "$AUDIO_DIR"
-    sudo mkdir -p "$INSTALL_DIR"
-    sudo chown "$(whoami)" "$INSTALL_DIR"
+    maybe_sudo mkdir -p "$AUDIO_DIR"
+    maybe_sudo chown "$(whoami)" "$AUDIO_DIR"
+    maybe_sudo mkdir -p "$INSTALL_DIR"
+    maybe_sudo chown "$(whoami)" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 
     # Download root files
@@ -296,10 +304,10 @@ EOF
 
     # Systemd audio HTTP server — always (re)write so port changes take effect
     write_service_file
-    sudo systemctl enable flag-audio-http
+    maybe_sudo systemctl enable flag-audio-http
 
     log "🔄 Restarting audio HTTP server..."
-    sudo systemctl restart flag-audio-http
+    maybe_sudo systemctl restart flag-audio-http
 
     log "🗓️  Running schedule_sonos.py to set up Sonos schedule crontab..."
     source "$VENV_DIR/bin/activate"
@@ -333,8 +341,8 @@ case $CHOICE in
         # Rewrite service file with new port and hot-reload
         PORT=$(jq -r '.port' "$CONFIG_FILE")
         write_service_file
-        sudo systemctl enable flag-audio-http
-        sudo systemctl restart flag-audio-http 2>/dev/null || true
+        maybe_sudo systemctl enable flag-audio-http
+        maybe_sudo systemctl restart flag-audio-http 2>/dev/null || true
         log "✅ Reconfiguration complete."
         ;;
     3)
