@@ -641,9 +641,8 @@ function prompt_menu() {
 
     if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
         _ip=$(jq -r '.sonos_ip // "not set"' "$CONFIG_FILE" 2>/dev/null)
-        _vol=$(jq -r '.volume // "not set"' "$CONFIG_FILE" 2>/dev/null)
         _cnt=$(jq '.schedules | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
-        echo "  Config: Sonos IP: $_ip | $_cnt schedule(s) | Volume: $_vol"
+        echo "  Config: Sonos IP: $_ip | $_cnt schedule(s)"
     fi
 
     if [ "$INSTALL_STATE" != "installed" ]; then
@@ -926,22 +925,34 @@ while true; do
         1)
             if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
                 show_install_required_msg
+                echo ""
+                read -rp "  Press Enter to return to menu..." _pause
             else
                 list_scheduled_plays
+                echo ""
+                read -rp "  Press Enter to return to menu..." _pause
             fi
             ;;
         2)
             if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
                 show_install_required_msg
+                echo ""
+                read -rp "  Press Enter to return to menu..." _pause
             else
                 test_sonos_playback
+                echo ""
+                read -rp "  Press Enter to return to menu..." _pause
             fi
             ;;
         3)
             if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
                 show_install_required_msg
+                echo ""
+                read -rp "  Press Enter to return to menu..." _pause
             else
                 view_logs
+                echo ""
+                read -rp "  Press Enter to return to menu..." _pause
             fi
             ;;
         4)
@@ -950,6 +961,8 @@ while true; do
         5)
             if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
                 show_install_required_msg
+                echo ""
+                read -rp "  Press Enter to return to menu..." _pause
             else
                 upgrade_scripts
             fi
