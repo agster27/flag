@@ -487,7 +487,7 @@ def main():
         return
 
     # --- Validate names and check for duplicates ---
-    seen_names: set = set()
+    seen_names: set[str] = set()
     processed = []
     for entry in schedules:
         raw_name = entry.get("name", "")
@@ -507,7 +507,7 @@ def main():
     print("Writing systemd unit files...")
 
     # --- Generate a service + timer pair for each schedule entry ---
-    written_names: set = set()
+    written_names: set[str] = set()
     for entry in processed:
         name = entry["name"]
         audio_url = entry["audio_url"]
