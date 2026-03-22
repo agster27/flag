@@ -175,7 +175,18 @@ function configure_setup() {
 
     # Hostname / IP this machine is reachable at
     # Use $default_port here (same value as $PORT) so the fallback is always valid
-    default_host=$(cfg_default "colors_url" "http://$(hostname -I | awk '{print $1}'):${default_port}/colors.mp3" \
+    # Preferred: use the IP that the kernel would route toward the Sonos speaker
+    local_ip=""
+    if [ -n "$SONOS_IP" ]; then
+        local_ip=$(ip route get "$SONOS_IP" 2>/dev/null \
+            | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' \
+            | head -1)
+    fi
+    # Fallback: first non-loopback IP from hostname -I
+    if [ -z "$local_ip" ]; then
+        local_ip=$(hostname -I | awk '{print $1}')
+    fi
+    default_host=$(cfg_default "colors_url" "http://${local_ip}:${default_port}/colors.mp3" \
         | sed 's|http://||;s|:.*||')
     read -rp "  Hostname or IP of THIS machine (for audio URLs) [${default_host}]: " INPUT
     HOST_ADDR="${INPUT:-$default_host}"
