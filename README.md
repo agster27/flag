@@ -22,7 +22,7 @@
 - 🐍 Python 3.8+
 - 📶 Sonos speaker on the local network
 - 🖥️ Ubuntu/Debian VM, LXC container, or **Raspberry Pi** (systemd required)
-- 🎧 Your own `colors.mp3` and `taps.mp3` in `/opt/flag/audio/`
+- 🎧 Default `colors.mp3` and `taps.mp3` audio files are included; replace with your own if desired
 
 ---
 
@@ -58,14 +58,14 @@ After setup, your `/opt/flag/` folder should look like:
 ├── audio_check.py         # Validates and converts audio files
 ├── config.py              # Central configuration loader
 ├── README.md              # Project readme (downloaded for reference)
-├── LICENSE                # Project license (downloaded for reference)
 ├── requirements.txt       # Python requirements (downloaded for reference)
-├── sonos_play.log         # 🎯 Log file (created at runtime)
+├── sonos_play.log         # 🎯 Playback log file (created at runtime)
+├── setup.log              # 🔧 Setup log file (created by setup.sh)
 ├── config.json            # 🔧 Settings (auto-generated if missing)
 ├── sonos-env/             # 🐍 Virtual environment
 └── audio/
-    ├── colors.mp3         # 🎶 Morning bugle call (add your own)
-    └── taps.mp3           # 🌅 Evening taps (add your own)
+    ├── colors.mp3         # 🎶 Morning bugle call (default included; replace with your own)
+    └── taps.mp3           # 🌅 Evening taps (default included; replace with your own)
 ```
 
 **Systemd unit files** (written by `schedule_sonos.py` to `/etc/systemd/system/`):
@@ -238,10 +238,16 @@ journalctl -u flag-reschedule -n 20
 
 ### 5. Check General Logs
 
-Review the setup/playback log file for errors or confirmations:
+Review the playback log file for errors or confirmations:
 
 ```bash
 cat /opt/flag/sonos_play.log
+```
+
+The setup log (written by `setup.sh`) is at:
+
+```bash
+cat /opt/flag/setup.log
 ```
 
 ---
@@ -260,6 +266,8 @@ cat /opt/flag/sonos_play.log
   `systemctl list-timers --all | grep flag`
 - **Check playback log:**  
   `cat /opt/flag/sonos_play.log`
+- **Check setup log:**  
+  `cat /opt/flag/setup.log`
 - **Manually trigger a play (for testing):**  
   `sudo systemctl start flag-colors.service`
 - **Sunset timer shows the wrong time?**  

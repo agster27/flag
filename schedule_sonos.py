@@ -496,8 +496,8 @@ def main():
         raw_name = entry.get("name", "")
         name = sanitise_name(raw_name)   # raises ValueError if invalid
         if name in seen_names:
-            raise ValueError(
-                f"Duplicate schedule name '{name}'. "
+            sys.exit(
+                f"❌ Duplicate schedule name '{name}'. "
                 "Each schedule entry must have a unique name."
             )
         seen_names.add(name)
