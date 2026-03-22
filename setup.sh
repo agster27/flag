@@ -574,6 +574,14 @@ function uninstall_all() {
     maybe_sudo systemctl daemon-reload
 
     maybe_sudo rm -rf "$INSTALL_DIR"
+
+    # Remove setup.sh itself if it lives outside INSTALL_DIR
+    SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+    case "$SELF" in
+        "$INSTALL_DIR"/*) ;;  # already deleted with INSTALL_DIR
+        *) maybe_sudo rm -f "$SELF" ;;
+    esac
+
     echo "✅ All files, systemd timers, and services removed!"
     exit 0
 }
