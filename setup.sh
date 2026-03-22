@@ -8,7 +8,7 @@
 set -e
 set -o pipefail
 
-SETUP_VERSION="1.5.0"
+SETUP_VERSION="1.6.0"
 
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"
@@ -273,6 +273,36 @@ function configure_setup() {
     read -rp "  Timezone (e.g. America/New_York) [${default_tz}]: " INPUT
     TIMEZONE="${INPUT:-$default_tz}"
 
+    # Offer to sync the system clock timezone to match the configured timezone
+    current_sys_tz=$(timedatectl show -p Timezone --value 2>/dev/null \
+        || cat /etc/timezone 2>/dev/null \
+        || echo "unknown")
+    echo ""
+    echo "  Current system timezone: $current_sys_tz"
+    if [ "$current_sys_tz" != "$TIMEZONE" ]; then
+        read -rp "  Set system timezone to '$TIMEZONE' so cron fires at the right local time? [Y/n]: " SYS_TZ_INPUT
+        SYS_TZ_INPUT="${SYS_TZ_INPUT:-y}"
+        if [[ "${SYS_TZ_INPUT,,}" == "y" ]]; then
+            maybe_sudo timedatectl set-timezone "$TIMEZONE" \
+                && echo "  ✅ System timezone set to $TIMEZONE." \
+                || echo "  ⚠️  Could not set system timezone automatically. Run: sudo timedatectl set-timezone $TIMEZONE"
+        fi
+    else
+        echo "  ✅ System timezone already matches ($TIMEZONE)."
+    fi
+    echo ""
+
+    # Colors play time
+    default_colors_time=$(cfg_default "colors_time" "08:00")
+    while true; do
+        read -rp "  Colors play time (HH:MM, 24h, local time) [${default_colors_time}]: " INPUT
+        COLORS_TIME="${INPUT:-$default_colors_time}"
+        if [[ "$COLORS_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+            break
+        fi
+        echo "  ⚠️  Please enter a valid time in HH:MM format (e.g. 08:00)."
+    done
+
     # Sunset offset
     default_offset=$(cfg_default "sunset_offset_minutes" "0")
     read -rp "  Sunset offset minutes [${default_offset}]: " INPUT
@@ -292,6 +322,7 @@ function configure_setup() {
   "latitude": $LATITUDE,
   "longitude": $LONGITUDE,
   "timezone": "$TIMEZONE",
+  "colors_time": "$COLORS_TIME",
   "sunset_offset_minutes": $SUNSET_OFFSET
 }
 EOF

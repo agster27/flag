@@ -3,9 +3,13 @@
 schedule_sonos.py — Calculates today's sunset and writes the Sonos cron schedule.
 
 Reads location and timezone from config.json, computes sunset time using the
-astral library, and installs three cron jobs: Colors at 0800, Taps at sunset
-(with an optional offset), and a daily self-reschedule at 0200 to keep the
-sunset time accurate.
+astral library, and installs three cron jobs: Colors at a configured local time
+(default 08:00), Taps at sunset (with an optional offset), and a daily
+self-reschedule at 02:00 to keep the sunset time accurate.
+
+All times are converted from the configured local timezone to UTC before being
+written to cron, because cron always fires at the system clock time (UTC on
+most servers).
 """
 import os
 import subprocess
@@ -58,9 +62,38 @@ def get_location(config):
         timezone = get_system_timezone()
     return LocationInfo(city, country, timezone, latitude, longitude)
 
+def local_to_utc_hm(hour, minute, tz_name):
+    """
+    Convert a local wall-clock time (today) to UTC hour and minute.
+
+    Handles DST transitions: non-existent times (spring-forward) use the DST
+    interpretation; ambiguous times (fall-back) use standard time.
+
+    Args:
+        hour (int): Local hour (0–23).
+        minute (int): Local minute (0–59).
+        tz_name (str): IANA timezone name (e.g. ``"America/New_York"``).
+
+    Returns:
+        tuple[int, int]: (hour, minute) in UTC.
+    """
+    tz = pytz.timezone(tz_name)
+    now = datetime.now(tz)
+    naive_dt = datetime(now.year, now.month, now.day, hour, minute)
+    try:
+        local_dt = tz.localize(naive_dt, is_dst=None)
+    except pytz.exceptions.NonExistentTimeError:
+        # Clocks spring forward — this wall time doesn't exist; use DST side of the gap.
+        local_dt = tz.localize(naive_dt, is_dst=True)
+    except pytz.exceptions.AmbiguousTimeError:
+        # Clocks fall back — time occurs twice; use standard-time (post-transition) side.
+        local_dt = tz.localize(naive_dt, is_dst=False)
+    utc_dt = local_dt.astimezone(pytz.utc)
+    return utc_dt.hour, utc_dt.minute
+
 def get_sunset_cron_time(config):
     """
-    Calculate today's sunset hour and minute for the configured location.
+    Calculate today's sunset hour and minute (in UTC) for the configured location.
 
     Applies the optional ``sunset_offset_minutes`` config value as a positive
     or negative offset from actual sunset.
@@ -69,13 +102,14 @@ def get_sunset_cron_time(config):
         config (dict): Parsed configuration dictionary.
 
     Returns:
-        tuple[int, int]: (hour, minute) of the (optionally offset) sunset time.
+        tuple[int, int]: (hour, minute) in UTC of the (optionally offset) sunset time.
     """
     loc = get_location(config)
     s = sun(loc.observer, date=datetime.now().date(), tzinfo=pytz.timezone(loc.timezone))
     sunset = s["sunset"]
     sunset_time = sunset + timedelta(minutes=config.get("sunset_offset_minutes", 0))
-    return sunset_time.hour, sunset_time.minute
+    sunset_utc = sunset_time.astimezone(pytz.utc)
+    return sunset_utc.hour, sunset_utc.minute
 
 def get_crontab():
     """
@@ -131,42 +165,65 @@ def main():
     Load config, calculate sunset, and write the three Sonos cron jobs.
 
     Replaces any existing flag_sonos_autogen cron entries with fresh ones:
-    Colors at 0800, Taps at today's (offset) sunset, and a self-reschedule
-    at 0200 to recalculate sunset the following day.
+    Colors at the configured local time (default 08:00), Taps at today's
+    (offset) sunset, and a self-reschedule at 02:00 to recalculate sunset
+    the following day.  All times are converted to UTC before being written
+    to cron.
     """
     config = load_config()
     colors_url = config["colors_url"]
     taps_url = config["taps_url"]
+    tz_name = config.get("timezone") or get_system_timezone()
 
-    # 1. Calculate sunset time for taps
+    # 1. Parse colors play time (local) and convert to UTC
+    colors_time_str = config.get("colors_time", "08:00")
+    colors_hour, colors_minute = map(int, colors_time_str.split(":"))
+    colors_hour_utc, colors_min_utc = local_to_utc_hm(colors_hour, colors_minute, tz_name)
+
+    # 2. Calculate sunset time for taps (returned in UTC)
     sunset_hour, sunset_minute = get_sunset_cron_time(config)
 
-    # 2. Compose commands
+    # 3. Convert reschedule time (02:00 local) to UTC
+    reschedule_hour_utc, reschedule_min_utc = local_to_utc_hm(2, 0, tz_name)
+
+    # 4. Compose commands
     colors_cmd = f'{PYTHON_BIN} {SONOS_PLAY} "{colors_url}"'
     taps_cmd = f'{PYTHON_BIN} {SONOS_PLAY} "{taps_url}"'
     schedule_cmd = f'{PYTHON_BIN} {os.path.abspath(__file__)}'
 
-    # 3. Prepare new flag_sonos_autogen crontab entries
+    # 5. Prepare new flag_sonos_autogen crontab entries
     new_cron = [
-        build_cron_entry(0, 8, colors_cmd),  # Colors at 8:00 AM
-        build_cron_entry(sunset_minute, sunset_hour, taps_cmd),  # Taps at sunset
-        build_cron_entry(0, 2, schedule_cmd),  # Recalculate sunset at 2AM
+        build_cron_entry(colors_min_utc, colors_hour_utc, colors_cmd),        # Colors
+        build_cron_entry(sunset_minute, sunset_hour, taps_cmd),                # Taps at sunset
+        build_cron_entry(reschedule_min_utc, reschedule_hour_utc, schedule_cmd),  # Reschedule
     ]
 
-    # 4. Read current crontab and strip out all old flag_sonos_autogen lines
+    # 6. Read current crontab and strip out all old flag_sonos_autogen lines
     cur_cron = get_crontab()
     filtered = [line for line in cur_cron if CRON_MARKER not in line and line.strip() != '']
 
-    # 5. Add new lines
+    # 7. Add new lines
     filtered += new_cron
 
-    # 6. Write updated crontab
+    # 8. Write updated crontab
     write_crontab(filtered)
 
-    # 7. Print result
+    # 9. Print result
     print("Crontab updated with the following jobs:")
-    for line in new_cron:
-        print(line)
+    print(f"  Colors at {colors_hour:02d}:{colors_minute:02d} {tz_name} "
+          f"({colors_hour_utc:02d}:{colors_min_utc:02d} UTC) "
+          f"→ cron: {colors_min_utc} {colors_hour_utc} * * *")
+    # Convert sunset UTC back to local time for display
+    tz_obj = pytz.timezone(tz_name)
+    today = datetime.now(tz_obj).date()
+    sunset_utc_dt = pytz.utc.localize(datetime(today.year, today.month, today.day, sunset_hour, sunset_minute))
+    sunset_local_dt = sunset_utc_dt.astimezone(tz_obj)
+    print(f"  Taps at sunset ({sunset_local_dt.hour:02d}:{sunset_local_dt.minute:02d} {tz_name} / "
+          f"{sunset_hour:02d}:{sunset_minute:02d} UTC) "
+          f"→ cron: {sunset_minute} {sunset_hour} * * *")
+    print(f"  Reschedule at 02:00 {tz_name} "
+          f"({reschedule_hour_utc:02d}:{reschedule_min_utc:02d} UTC) "
+          f"→ cron: {reschedule_min_utc} {reschedule_hour_utc} * * *")
 
 if __name__ == "__main__":
     main()
