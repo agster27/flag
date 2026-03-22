@@ -37,11 +37,41 @@ chmod +x setup.sh
 ```
 
 **You will be prompted with a menu:**
-1. Install / update to the latest scripts (recommended for first install or upgrades)
-2. Reconfigure (edit config.json interactively)
-3. Test Sonos playback
-4. Uninstall completely
-5. Exit without doing anything
+
+```
+╔══════════════════════════════════════════╗
+║     Honor Tradition with Tech — Setup    ║
+║     Version 2.1.0                        ║
+║     Status: ✅ Installed                  ║
+╚══════════════════════════════════════════╝
+  Config: Sonos IP: 192.168.1.50 | 2 schedule(s) | Volume: 30
+
+  ── Read-only ──────────────────────────
+  1) List scheduled plays
+  2) Test Sonos playback
+  3) View logs
+
+  ── Configuration ──────────────────────
+  4) Install (first-time setup)
+  5) Upgrade (update scripts, keep config)
+  6) Reconfigure (edit config.json interactively)
+
+  ── Danger zone ────────────────────────
+  7) Uninstall completely
+
+  8) Exit without doing anything
+```
+
+| Option | Action |
+|--------|--------|
+| **1** | List scheduled plays — shows all configured schedules, systemd timer status, and audio HTTP server status |
+| **2** | Test Sonos playback — plays a test audio clip on your Sonos speaker |
+| **3** | View logs — shows the last 20 lines of `setup.log` and `sonos_play.log` |
+| **4** | Install (first-time setup) — installs system deps, downloads files, creates venv, runs config wizard, writes systemd timers |
+| **5** | Upgrade — downloads latest scripts from GitHub and upgrades pip packages; **preserves your existing `config.json`** |
+| **6** | Reconfigure — re-runs the config wizard to edit settings and regenerate timers |
+| **7** | Uninstall — removes all files, systemd services, and timers |
+| **8** | Exit without making any changes |
 
 > The script will automatically download all required files from GitHub using wget (no `git clone` needed), create a Python virtual environment, install dependencies, and generate a default `config.json` if needed.
 
@@ -151,7 +181,7 @@ Each entry in `schedules` defines one scheduled audio play:
 | `audio_url` | Full HTTP URL of the MP3 to play (served by the built-in audio HTTP server). |
 | `time` | When to play: either `"HH:MM"` (24-hour local time) or the special value `"sunset"`. |
 
-> **Backward compatibility:** If you have an older install that still uses the flat `colors_url` / `taps_url` / `colors_time` keys, `schedule_sonos.py` will automatically synthesise a schedules list from them and print a deprecation warning. Re-run `setup.sh` → option 2 (Reconfigure) to permanently migrate to the new format.
+> **Backward compatibility:** If you have an older install that still uses the flat `colors_url` / `taps_url` / `colors_time` keys, `schedule_sonos.py` will automatically synthesise a schedules list from them and print a deprecation warning. Re-run `setup.sh` → option 6 (Reconfigure) to permanently migrate to the new format.
 
 ---
 
@@ -171,7 +201,7 @@ To add a new scheduled audio play (e.g., a 17:00 retreat call):
    }
    ```
 
-3. **Re-run setup.sh** and choose option **2 (Reconfigure)**, or run:
+3. **Re-run setup.sh** and choose option **6 (Reconfigure)**, or run:
 
    ```bash
    sudo /opt/flag/sonos-env/bin/python /opt/flag/schedule_sonos.py

@@ -8,7 +8,7 @@
 set -e
 set -o pipefail
 
-SETUP_VERSION="2.0.0"
+SETUP_VERSION="2.1.0"
 
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"
@@ -532,15 +532,118 @@ function test_sonos_playback() {
     echo "  📋 Full log: $LOG_FILE"
 }
 
+function list_scheduled_plays() {
+    echo ""
+    echo "============================================"
+    echo "  Scheduled Plays                           "
+    echo "============================================"
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "  ⚠️  config.json not found. Run Install first."
+        return
+    fi
+    if ! command -v jq &>/dev/null; then
+        echo "  ⚠️  'jq' not found. Cannot parse config.json."
+        return
+    fi
+
+    SCHEDULE_COUNT=$(jq '.schedules | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
+    if [ "$SCHEDULE_COUNT" -eq 0 ]; then
+        echo "  ⚠️  No schedules configured in config.json."
+    else
+        printf "  %-20s %-35s %-10s\n" "NAME" "AUDIO FILE" "TIME"
+        printf "  %-20s %-35s %-10s\n" "--------------------" "-----------------------------------" "----------"
+        for i in $(seq 0 $((SCHEDULE_COUNT - 1))); do
+            _name=$(jq -r ".schedules[$i].name // \"(unnamed)\"" "$CONFIG_FILE")
+            _url=$(jq -r ".schedules[$i].audio_url // \"(none)\"" "$CONFIG_FILE")
+            _time=$(jq -r ".schedules[$i].time // \"(none)\"" "$CONFIG_FILE")
+            _file=$(basename "$_url")
+            printf "  %-20s %-35s %-10s\n" "$_name" "$_file" "$_time"
+        done
+    fi
+
+    echo ""
+    echo "  --- Systemd Timer Status ---"
+    if systemctl list-timers --all 2>/dev/null | grep -q "flag"; then
+        systemctl list-timers --all 2>/dev/null | grep -E "(NEXT|flag)" | sed 's/^/  /'
+    else
+        echo "  (no flag timers found)"
+    fi
+
+    echo ""
+    echo "  --- Audio HTTP Server ---"
+    if systemctl is-active flag-audio-http &>/dev/null; then
+        echo "  ✅ flag-audio-http is running"
+    elif systemctl list-unit-files flag-audio-http.service &>/dev/null 2>&1 | grep -q "flag-audio-http"; then
+        echo "  ⛔ flag-audio-http is installed but not running"
+    else
+        echo "  ℹ️  flag-audio-http service not installed"
+    fi
+    echo ""
+}
+
+function view_logs() {
+    echo ""
+    echo "============================================"
+    echo "  Recent Logs                               "
+    echo "============================================"
+
+    SONOS_LOG="$INSTALL_DIR/sonos_play.log"
+
+    echo ""
+    echo "  --- Setup Log (last 20 lines) ---"
+    if [ -f "$LOG_FILE" ]; then
+        tail -n 20 "$LOG_FILE" | sed 's/^/  /'
+    else
+        echo "  (no setup log found at $LOG_FILE)"
+    fi
+
+    echo ""
+    echo "  --- Playback Log (last 20 lines) ---"
+    if [ -f "$SONOS_LOG" ]; then
+        tail -n 20 "$SONOS_LOG" | sed 's/^/  /'
+    else
+        echo "  (no playback log found at $SONOS_LOG)"
+    fi
+    echo ""
+}
+
 function prompt_menu() {
     echo ""
-    echo "What would you like to do?"
-    echo "1) Install / update to the latest scripts"
-    echo "2) Reconfigure (edit config.json interactively)"
-    echo "3) Test Sonos playback"
-    echo "4) Uninstall completely"
-    echo "5) Exit without doing anything"
-    read -rp "Enter your choice [1-5]: " CHOICE
+    echo "╔══════════════════════════════════════════╗"
+    echo "║     Honor Tradition with Tech — Setup    ║"
+    printf "║     Version %-29s ║\n" "$SETUP_VERSION"
+    if [ -d "$VENV_DIR" ]; then
+        echo "║     Status: ✅ Installed                  ║"
+    else
+        echo "║     Status: ⚙️  Not installed               ║"
+    fi
+    echo "╚══════════════════════════════════════════╝"
+
+    if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
+        _ip=$(jq -r '.sonos_ip // "not set"' "$CONFIG_FILE" 2>/dev/null)
+        _vol=$(jq -r '.volume // "not set"' "$CONFIG_FILE" 2>/dev/null)
+        _cnt=$(jq '.schedules | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
+        echo "  Config: Sonos IP: $_ip | $_cnt schedule(s) | Volume: $_vol"
+    fi
+
+    echo ""
+    echo "  ── Read-only ──────────────────────────"
+    echo "  1) List scheduled plays"
+    echo "  2) Test Sonos playback"
+    echo "  3) View logs"
+    echo ""
+    echo "  ── Configuration ──────────────────────"
+    echo "  4) Install (first-time setup)"
+    echo "  5) Upgrade (update scripts, keep config)"
+    echo "  6) Reconfigure (edit config.json interactively)"
+    echo ""
+    echo "  ── Danger zone ────────────────────────"
+    echo "  7) Uninstall completely"
+    echo ""
+    echo "  8) Exit without doing anything"
+    echo ""
+    read -rp "Enter your choice [1-8]: " CHOICE
 }
 
 function uninstall_all() {
@@ -586,7 +689,7 @@ function uninstall_all() {
     exit 0
 }
 
-function update_or_install() {
+function install_fresh() {
     log "🚀 Running setup.sh version $SETUP_VERSION"
     log "🔧 Setting up Sonos Scheduled Playback Environment..."
 
@@ -699,7 +802,73 @@ EOF
     log "  journalctl -u flag-taps -n 50"
     log ""
     log "Edit your config at any time: $INSTALL_DIR/config.json"
-    log "Or re-run this script and choose option 2 (Reconfigure)."
+    log "Or re-run this script and choose option 6 (Reconfigure)."
+}
+
+function upgrade_scripts() {
+    log "🚀 Running setup.sh version $SETUP_VERSION — Upgrade"
+
+    if [ ! -d "$VENV_DIR" ]; then
+        log "⚠️  Installation not detected (no virtualenv at $VENV_DIR)."
+        log "    Please run Install (option 4) first."
+        return
+    fi
+
+    log "🔧 Upgrading scripts and dependencies (config.json will be preserved)..."
+
+    maybe_sudo mkdir -p "$AUDIO_DIR"
+    maybe_sudo chown "$(whoami)" "$AUDIO_DIR"
+    cd "$INSTALL_DIR"
+
+    # Download latest root files, skipping config.json
+    log "🌐 Fetching file list from GitHub API (root)..."
+    FILES=$(wget -qO- https://api.github.com/repos/agster27/flag/contents/ | jq -r '.[] | select(.type == "file") | .name')
+    if [ -z "$FILES" ]; then
+        log "❌ Could not fetch file list from GitHub. Exiting."
+        exit 1
+    fi
+
+    log "⬇️  Downloading latest scripts from GitHub (root)..."
+    for file in $FILES; do
+        if [ "$file" = "config.json" ]; then
+            log "Skipping config.json (preserving user config)"
+            continue
+        fi
+        if wget -q "$BASE_URL/$file" -O "$file"; then
+            log "Downloaded: $file"
+        else
+            log "WARNING: $file could not be downloaded!"
+        fi
+    done
+
+    # Download latest audio files
+    log "🌐 Fetching audio file list from GitHub API (audio/)..."
+    AUDIO_FILES=$(wget -qO- https://api.github.com/repos/agster27/flag/contents/audio | jq -r '.[] | select(.type == "file") | .name')
+
+    log "⬇️  Downloading audio files from GitHub (audio/)..."
+    for audio_file in $AUDIO_FILES; do
+        if wget -q "$BASE_URL/audio/$audio_file" -O "$AUDIO_DIR/$audio_file"; then
+            log "Downloaded: audio/$audio_file"
+        else
+            log "WARNING: audio/$audio_file could not be downloaded!"
+        fi
+    done
+
+    log "🔑 Setting execute permissions on Python scripts..."
+    find "$INSTALL_DIR" -maxdepth 1 -type f -name "*.py" -exec chmod +x {} \;
+
+    log "📦 Upgrading Python dependencies in virtualenv..."
+    source "$VENV_DIR/bin/activate"
+    pip install --upgrade pip
+    pip install --upgrade -r "$REQUIREMENTS_TXT"
+    deactivate
+    log "✅ Python dependencies upgraded."
+
+    # Regenerate systemd timer units with the existing config
+    log "🗓️  Regenerating systemd timer units..."
+    maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
+
+    log "✅ Upgrade complete. Your config.json was not changed."
 }
 
 # ---------------------------------------------------------------------------
@@ -707,9 +876,21 @@ EOF
 prompt_menu
 case $CHOICE in
     1)
-        update_or_install
+        list_scheduled_plays
         ;;
     2)
+        test_sonos_playback
+        ;;
+    3)
+        view_logs
+        ;;
+    4)
+        install_fresh
+        ;;
+    5)
+        upgrade_scripts
+        ;;
+    6)
         configure_setup
         # Rewrite service file with new port and hot-reload
         PORT=$(jq -r '.port' "$CONFIG_FILE")
@@ -721,14 +902,11 @@ case $CHOICE in
             log "🗓️  Regenerating systemd timer units..."
             maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
         else
-            log "⚠️  Python venv not found. Run option 1 (Install) to create systemd timers."
+            log "⚠️  Python venv not found. Run option 4 (Install) to create systemd timers."
         fi
         log "✅ Reconfiguration complete."
         ;;
-    3)
-        test_sonos_playback
-        ;;
-    4)
+    7)
         uninstall_all
         ;;
     *)
