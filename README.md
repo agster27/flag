@@ -62,6 +62,8 @@ chmod +x setup.sh
   8) Exit without doing anything
 ```
 
+> **Install state detection:** When `setup.sh` loads, it automatically checks for the Python virtual environment (`/opt/flag/sonos-env`), the config file (`/opt/flag/config.json`), and active systemd timers. If any component is missing, a warning is displayed above the menu with guidance on which option to select. On a fresh system, the "Install" option is marked with `← start here` and options that require a working installation are annotated with `(requires install)`.
+
 | Option | Action |
 |--------|--------|
 | **1** | List scheduled plays — shows all configured schedules, systemd timer status, and audio HTTP server status |
