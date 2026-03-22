@@ -678,7 +678,7 @@ EOF
     log "  curl -I http://localhost:${PORT}/colors.mp3"
     log ""
     log "To test Sonos playback manually, run:"
-    log "  $VENV_DIR/bin/python $INSTALL_DIR/sonos_play.py"
+    log "  $VENV_DIR/bin/python $INSTALL_DIR/sonos_play.py <audio_url>"
     log ""
     log "Check status of the audio server:"
     log "  sudo systemctl status flag-audio-http"

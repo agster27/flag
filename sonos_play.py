@@ -74,11 +74,34 @@ def main():
     args = parser.parse_args()
 
     config = load_config()
-    sonos_ip = config["sonos_ip"]
-    volume = config["volume"]
+
+    # --- Validate required config keys (Issue 1) ---
+    sonos_ip = config.get("sonos_ip")
+    if sonos_ip is None or not isinstance(sonos_ip, str) or not sonos_ip.strip():
+        log("ERROR: 'sonos_ip' is missing or invalid in config.json. Aborting.")
+        sys.exit("❌ 'sonos_ip' is missing or invalid in config.json. Please run setup.sh to reconfigure.")
+
+    volume = config.get("volume")
+    if volume is None or not isinstance(volume, (int, float)):
+        log("ERROR: 'volume' is missing or not a number in config.json. Aborting.")
+        sys.exit("❌ 'volume' is missing or not a number in config.json. Please run setup.sh to reconfigure.")
+
+    # --- Validate volume range (Issue 3) ---
+    volume = int(volume)
+    if not (0 <= volume <= 100):
+        clamped = max(0, min(100, volume))
+        log(f"WARNING: Volume {volume} is outside 0–100; clamping to {clamped}.")
+        print(f"  ⚠️  Volume {volume} is outside valid range 0–100; clamping to {clamped}.", file=sys.stderr)
+        volume = clamped
+
     skip_restore_if_idle = config.get("skip_restore_if_idle", True)
     default_wait = config.get("default_wait_seconds", 60)
+
+    # --- Validate audio_url argument (Issue 2) ---
     audio_url = args.audio_url
+    if not audio_url.startswith("http://") and not audio_url.startswith("https://"):
+        log(f"ERROR: audio_url '{audio_url}' is not a valid HTTP URL. Aborting.")
+        sys.exit(f"❌ audio_url must start with http:// or https://. Got: {audio_url!r}")
 
     try:
         speaker = soco.SoCo(sonos_ip)
