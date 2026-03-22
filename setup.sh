@@ -406,40 +406,6 @@ function configure_setup() {
         echo "  ℹ️  To add more plays later, use option 1) List scheduled plays from the main menu."
     fi
 
-    # Prompt to add additional scheduled plays
-    while true; do
-        echo ""
-        read -rp "  Add another scheduled play? [y/N]: " _add
-        _add="${_add:-n}"
-        [[ "${_add,,}" == "y" ]] || break
-
-        while true; do
-            read -rp "    Name (letters, numbers, hyphens, underscores only): " _new_name
-            if [[ "$_new_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-                break
-            fi
-            echo "    ⚠️  Invalid name. Use only letters, numbers, hyphens, and underscores."
-        done
-
-        read -rp "    Audio filename (e.g. bugle.mp3): " _new_file
-        _new_file="${_new_file:-bugle.mp3}"
-
-        while true; do
-            read -rp "    Play time (HH:MM or 'sunset'): " _new_time
-            if [[ "$_new_time" == "sunset" ]] || \
-               [[ "$_new_time" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
-                break
-            fi
-            echo "    ⚠️  Enter a valid time (HH:MM, e.g. 17:00) or 'sunset'."
-        done
-
-        _snames[$_scount]="$_new_name"
-        _sfiles[$_scount]="$_new_file"
-        _stimes[$_scount]="$_new_time"
-        echo "    ✅ Added: name='$_new_name'  file='$_new_file'  time='$_new_time'"
-        _scount=$(( _scount + 1 ))
-    done
-
     # Safety net: if no schedules ended up configured, restore defaults
     if [ "$_scount" -eq 0 ]; then
         echo "  ⚠️  No schedules configured. Falling back to defaults (colors + taps)."
