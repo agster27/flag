@@ -199,8 +199,13 @@ function configure_setup() {
     if [ -z "$local_ip" ]; then
         local_ip=$(hostname -I | awk '{print $1}')
     fi
-    default_host=$(cfg_default "colors_url" "http://${local_ip}:${default_port}/colors.mp3" \
-        | sed 's|http://||;s|:.*||')
+    # Hostname / IP default: prefer detected local_ip, fall back to existing config
+    if [ -n "$local_ip" ]; then
+        default_host="$local_ip"
+    else
+        default_host=$(cfg_default "colors_url" "http://localhost:${default_port}/colors.mp3" \
+            | sed 's|http://||;s|:.*||')
+    fi
     read -rp "  Hostname or IP of THIS machine (for audio URLs) [${default_host}]: " INPUT
     HOST_ADDR="${INPUT:-$default_host}"
 
