@@ -8,7 +8,7 @@
 set -e
 set -o pipefail
 
-SETUP_VERSION="1.4.0"
+SETUP_VERSION="1.5.0"
 
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"
@@ -71,6 +71,73 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Auto-discover Sonos speakers on the local network via soco/SSDP.
+# Sets SONOS_IP to the chosen/found IP, or empty string if none selected.
+# Requires the Python venv (with soco installed) to already exist.
+# ---------------------------------------------------------------------------
+function discover_sonos_ip() {
+    log "🔍 Scanning network for Sonos speakers..."
+    # Use tab as delimiter to avoid conflicts with speaker names that may contain '|'
+    DISCOVERED=$("$VENV_DIR/bin/python" - <<'PYEOF'
+import sys
+try:
+    from soco.discovery import discover
+    devices = sorted(discover(timeout=5) or [], key=lambda d: d.player_name)
+    for d in devices:
+        print(f"{d.player_name}\t{d.ip_address}")
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+PYEOF
+)
+
+    DISCOVER_EXIT=$?
+    if [ -z "$DISCOVERED" ]; then
+        echo ""
+        if [ $DISCOVER_EXIT -ne 0 ]; then
+            echo "  ⚠️  Sonos discovery encountered an error. You can enter the IP address manually."
+        else
+            echo "  ⚠️  No Sonos speakers found on the network."
+            echo "  You can enter the IP address manually."
+        fi
+        SONOS_IP=""
+        return
+    fi
+
+    echo ""
+    echo "  Found Sonos speakers:"
+    i=1
+    declare -a IPS
+    # IPS is 1-indexed intentionally: IPS[$i] maps directly to the user's "Select N" input
+    while IFS=$'\t' read -r name ip; do
+        echo "    $i) $name — $ip"
+        IPS[$i]="$ip"
+        ((i++))
+    done <<< "$DISCOVERED"
+    echo ""
+
+    COUNT=$((i - 1))
+    if [ "$COUNT" -eq 1 ]; then
+        SONOS_IP="${IPS[1]}"
+        echo "  ✅ Only one speaker found. Using: $SONOS_IP"
+        return
+    fi
+
+    while true; do
+        read -rp "  Select speaker [1-${COUNT}] or press Enter to enter IP manually: " SEL
+        if [ -z "$SEL" ]; then
+            SONOS_IP=""
+            return
+        fi
+        if [[ "$SEL" =~ ^[0-9]+$ ]] && [ "$SEL" -ge 1 ] && [ "$SEL" -le "$COUNT" ]; then
+            SONOS_IP="${IPS[$SEL]}"
+            echo "  ✅ Selected: $SONOS_IP"
+            return
+        fi
+        echo "  ⚠️  Please enter a number between 1 and $COUNT, or press Enter to type manually."
+    done
+}
+
+# ---------------------------------------------------------------------------
 # Interactive configuration wizard
 # Writes $CONFIG_FILE with user-supplied (or defaulted) values.
 # ---------------------------------------------------------------------------
@@ -82,10 +149,14 @@ function configure_setup() {
     echo "Press Enter to accept the value shown in [brackets]."
     echo ""
 
-    # Sonos IP
+    # Sonos IP — try auto-discovery first
     default_ip=$(cfg_default "sonos_ip" "")
-    read -rp "  Sonos speaker IP address [${default_ip}]: " INPUT
-    SONOS_IP="${INPUT:-$default_ip}"
+    discover_sonos_ip
+    # If discovery returned empty (no devices found or user chose manual), fall back
+    if [ -z "$SONOS_IP" ]; then
+        read -rp "  Sonos speaker IP address [${default_ip}]: " INPUT
+        SONOS_IP="${INPUT:-$default_ip}"
+    fi
 
     # HTTP server port
     default_port=$(cfg_default "port" "8000")
@@ -224,12 +295,6 @@ function update_or_install() {
     log "🚀 Running setup.sh version $SETUP_VERSION"
     log "🔧 Setting up Sonos Scheduled Playback Environment..."
 
-    # --- Configuration wizard (reads/writes config.json) ---
-    configure_setup
-
-    # Read port back from the freshly-written config
-    PORT=$(jq -r '.port' "$CONFIG_FILE")
-
     log "📦 Installing system dependencies..."
     maybe_sudo apt update | tee -a "$LOG_FILE"
     maybe_sudo apt install -y python3-full python3-venv ffmpeg jq wget | tee -a "$LOG_FILE"
@@ -294,13 +359,18 @@ EOF
         python3 -m venv "$VENV_DIR"
     fi
 
-    log "📦 Installing/updating Python dependencies in virtualenv..."
+    log "📦 Installing/upgrading Python dependencies in virtualenv..."
     source "$VENV_DIR/bin/activate"
     pip install --upgrade pip
-    pip install -r "$REQUIREMENTS_TXT"
+    pip install --upgrade -r "$REQUIREMENTS_TXT"
     deactivate
+    log "✅ Python dependencies installed/upgraded."
 
-    log "✅ Python dependencies installed."
+    # --- Configuration wizard (reads/writes config.json) ---
+    configure_setup
+
+    # Read port back from the freshly-written config
+    PORT=$(jq -r '.port' "$CONFIG_FILE")
 
     # Systemd audio HTTP server — always (re)write so port changes take effect
     write_service_file
