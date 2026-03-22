@@ -498,10 +498,18 @@ def main():
                 "Each schedule entry must have a unique name."
             )
         seen_names.add(name)
+        audio_url = entry.get("audio_url")
+        time_val = entry.get("time")
+        if not audio_url:
+            print(f"  ⚠️  Skipping '{name}': missing required 'audio_url' field in schedule entry.")
+            continue
+        if not time_val:
+            print(f"  ⚠️  Skipping '{name}': missing required 'time' field in schedule entry.")
+            continue
         processed.append({
             "name": name,
-            "audio_url": entry["audio_url"],
-            "time": entry["time"],
+            "audio_url": audio_url,
+            "time": time_val,
         })
 
     print("Writing systemd unit files...")
@@ -525,11 +533,16 @@ def main():
                 continue
         else:
             try:
-                hour, minute = map(int, time_str.split(":"))
+                parts = time_str.split(":")
+                if len(parts) != 2:
+                    raise ValueError("Expected HH:MM format")
+                hour, minute = int(parts[0]), int(parts[1])
+                if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                    raise ValueError(f"Time out of range: {time_str}")
             except (ValueError, AttributeError):
                 print(
                     f"  ⚠️  Skipping '{name}': invalid time format '{time_str}' "
-                    "(expected HH:MM or 'sunset')"
+                    "(expected HH:MM with hour 0–23 and minute 0–59, or 'sunset')"
                 )
                 continue
 
@@ -594,7 +607,8 @@ def main():
     print("  flag-reschedule.timer  →  flag-reschedule.service")
     print("")
     print("To verify:   systemctl list-timers --all | grep flag")
-    print("To inspect:  journalctl -u flag-colors -n 50")
+    first_name = sorted(written_names)[0] if written_names else "colors"
+    print(f"To inspect:  journalctl -u flag-{first_name} -n 50")
 
 
 if __name__ == "__main__":

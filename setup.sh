@@ -342,7 +342,7 @@ function configure_setup() {
                 _sfiles[$_scount]=$(jq -r ".schedules[${_i}].audio_url" "$CONFIG_FILE" | sed 's|.*/||')
                 _stimes[$_scount]=$(jq -r ".schedules[${_i}].time" "$CONFIG_FILE")
                 echo "    $(( _scount + 1 )). name='${_snames[$_scount]}'  file='${_sfiles[$_scount]}'  time='${_stimes[$_scount]}'"
-                (( _scount++ ))
+                _scount=$(( _scount + 1 ))
             done
             echo ""
             read -rp "  Keep all existing schedules? [Y/n]: " _keep
@@ -411,7 +411,7 @@ function configure_setup() {
         _sfiles[$_scount]="$_new_file"
         _stimes[$_scount]="$_new_time"
         echo "    ✅ Added: name='$_new_name'  file='$_new_file'  time='$_new_time'"
-        (( _scount++ ))
+        _scount=$(( _scount + 1 ))
     done
 
     # Safety net: if no schedules ended up configured, restore defaults
