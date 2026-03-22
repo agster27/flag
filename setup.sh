@@ -1,4 +1,14 @@
 #!/bin/bash
+# setup.sh — Installs, updates, or removes the Honor Tradition with Tech project.
+#
+# Downloads all scripts and audio files from GitHub, creates a Python virtual
+# environment, installs dependencies, sets up a systemd HTTP server to serve
+# audio files, and schedules cron jobs for daily Colors and Taps playback.
+#
+# Usage:
+#   wget --no-cache https://raw.githubusercontent.com/agster27/flag/main/setup.sh -O setup.sh
+#   chmod +x setup.sh
+#   ./setup.sh
 set -e
 set -o pipefail
 
