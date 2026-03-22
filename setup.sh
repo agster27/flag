@@ -608,6 +608,41 @@ function view_logs() {
     echo ""
 }
 
+# ---------------------------------------------------------------------------
+# Detect the current installation state and set INSTALL_STATE + INSTALL_STATE_MSG.
+# Must be called after variables are defined but before prompt_menu is displayed.
+# ---------------------------------------------------------------------------
+function show_install_required_msg() {
+    echo ""
+    echo "  ⚠️  This option requires a completed installation."
+    echo "  Please run \"Install\" first (option 4)."
+}
+
+function detect_install_state() {
+    local has_venv=false has_config=false has_timers=false
+
+    [ -d "$VENV_DIR" ] && has_venv=true
+    [ -f "$CONFIG_FILE" ] && has_config=true
+    ls /etc/systemd/system/flag-*.timer 2>/dev/null | grep -q . && has_timers=true
+
+    if ! $has_venv && ! $has_config; then
+        INSTALL_STATE="none"
+        INSTALL_STATE_MSG="⚠️  No installation detected. Please select \"Install\" to get started."
+    elif ! $has_venv && $has_config; then
+        INSTALL_STATE="partial_no_venv"
+        INSTALL_STATE_MSG="⚠️  config.json found but Python environment is missing. Please select \"Install\" to complete setup."
+    elif $has_venv && ! $has_config; then
+        INSTALL_STATE="partial_no_config"
+        INSTALL_STATE_MSG="⚠️  Python environment found but config.json is missing. Please select \"Reconfigure\" to set up your config."
+    elif $has_venv && $has_config && ! $has_timers; then
+        INSTALL_STATE="partial_no_timers"
+        INSTALL_STATE_MSG="⚠️  Installation found but no systemd timers detected. Select \"Install\" or \"Reconfigure\" to generate timers."
+    else
+        INSTALL_STATE="installed"
+        INSTALL_STATE_MSG=""
+    fi
+}
+
 function prompt_menu() {
     echo ""
     echo "╔══════════════════════════════════════════╗"
@@ -627,16 +662,43 @@ function prompt_menu() {
         echo "  Config: Sonos IP: $_ip | $_cnt schedule(s) | Volume: $_vol"
     fi
 
+    if [ "$INSTALL_STATE" != "installed" ]; then
+        echo ""
+        echo "  ============================================"
+        echo "  $INSTALL_STATE_MSG"
+        echo "  ============================================"
+    fi
+
+    # Determine per-option annotations
+    local _install_label="Install (first-time setup)"
+    local _list_label="List scheduled plays"
+    local _test_label="Test Sonos playback"
+    local _logs_label="View logs"
+    local _upgrade_label="Upgrade (update scripts, keep config)"
+    local _reconfig_label="Reconfigure (edit config.json interactively)"
+
+    if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
+        _install_label="Install (first-time setup)  ← start here"
+        _list_label="List scheduled plays  (requires install)"
+        _test_label="Test Sonos playback  (requires install)"
+        _logs_label="View logs  (requires install)"
+        _upgrade_label="Upgrade (update scripts, keep config)  (requires install)"
+    fi
+
+    if [ "$INSTALL_STATE" = "none" ]; then
+        _reconfig_label="Reconfigure (edit config.json interactively)  (requires install)"
+    fi
+
     echo ""
     echo "  ── Read-only ──────────────────────────"
-    echo "  1) List scheduled plays"
-    echo "  2) Test Sonos playback"
-    echo "  3) View logs"
+    echo "  1) $_list_label"
+    echo "  2) $_test_label"
+    echo "  3) $_logs_label"
     echo ""
     echo "  ── Configuration ──────────────────────"
-    echo "  4) Install (first-time setup)"
-    echo "  5) Upgrade (update scripts, keep config)"
-    echo "  6) Reconfigure (edit config.json interactively)"
+    echo "  4) $_install_label"
+    echo "  5) $_upgrade_label"
+    echo "  6) $_reconfig_label"
     echo ""
     echo "  ── Danger zone ────────────────────────"
     echo "  7) Uninstall completely"
@@ -873,38 +935,59 @@ function upgrade_scripts() {
 
 # ---------------------------------------------------------------------------
 
+detect_install_state
 prompt_menu
 case $CHOICE in
     1)
-        list_scheduled_plays
+        if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
+            show_install_required_msg
+        else
+            list_scheduled_plays
+        fi
         ;;
     2)
-        test_sonos_playback
+        if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
+            show_install_required_msg
+        else
+            test_sonos_playback
+        fi
         ;;
     3)
-        view_logs
+        if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
+            show_install_required_msg
+        else
+            view_logs
+        fi
         ;;
     4)
         install_fresh
         ;;
     5)
-        upgrade_scripts
+        if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
+            show_install_required_msg
+        else
+            upgrade_scripts
+        fi
         ;;
     6)
-        configure_setup
-        # Rewrite service file with new port and hot-reload
-        PORT=$(jq -r '.port' "$CONFIG_FILE")
-        write_service_file
-        maybe_sudo systemctl enable flag-audio-http
-        maybe_sudo systemctl restart flag-audio-http 2>/dev/null || true
-        # Regenerate systemd timer units with the updated config
-        if [ -d "$VENV_DIR" ]; then
-            log "🗓️  Regenerating systemd timer units..."
-            maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
+        if [ "$INSTALL_STATE" = "none" ]; then
+            show_install_required_msg
         else
-            log "⚠️  Python venv not found. Run option 4 (Install) to create systemd timers."
+            configure_setup
+            # Rewrite service file with new port and hot-reload
+            PORT=$(jq -r '.port' "$CONFIG_FILE")
+            write_service_file
+            maybe_sudo systemctl enable flag-audio-http
+            maybe_sudo systemctl restart flag-audio-http 2>/dev/null || true
+            # Regenerate systemd timer units with the updated config
+            if [ -d "$VENV_DIR" ]; then
+                log "🗓️  Regenerating systemd timer units..."
+                maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
+            else
+                log "⚠️  Python venv not found. Run option 4 (Install) to create systemd timers."
+            fi
+            log "✅ Reconfiguration complete."
         fi
-        log "✅ Reconfiguration complete."
         ;;
     7)
         uninstall_all
