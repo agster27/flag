@@ -727,8 +727,8 @@ function show_install_required_msg() {
 function detect_install_state() {
     local has_venv=false has_config=false has_timers=false
 
-    [ -d "$VENV_DIR" ] && has_venv=true
-    [ -f "$CONFIG_FILE" ] && has_config=true
+    [ -d "$VENV_DIR" ] && has_venv=true || true
+    [ -f "$CONFIG_FILE" ] && has_config=true || true
     ls /etc/systemd/system/flag-*.timer 2>/dev/null | grep -q . && has_timers=true || true
 
     if ! $has_venv && ! $has_config; then
@@ -768,7 +768,7 @@ function prompt_menu() {
     fi
 
     get_sunset_header_line
-    [ -n "$SUNSET_HEADER_LINE" ] && echo "$SUNSET_HEADER_LINE"
+    [ -n "$SUNSET_HEADER_LINE" ] && echo "$SUNSET_HEADER_LINE" || true
 
     if [ "$INSTALL_STATE" != "installed" ]; then
         echo ""
