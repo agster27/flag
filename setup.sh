@@ -463,6 +463,77 @@ function configure_setup() {
 
 # ---------------------------------------------------------------------------
 
+function show_sunset_time() {
+    echo ""
+    echo "============================================"
+    echo "  Today's Sunset Time"
+    echo "============================================"
+
+    if [ ! -d "$VENV_DIR" ]; then
+        echo "  ⚠️  Python venv not found. Please run Install first."
+        return
+    fi
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "  ⚠️  config.json not found. Please run Install or Reconfigure first."
+        return
+    fi
+
+    local _sunset_output
+    _sunset_output=$(cd "$INSTALL_DIR" && "$VENV_DIR/bin/python" - <<'PYEOF' 2>/tmp/sunset_stderr
+import sys
+try:
+    from config import load_config
+    from schedule_sonos import get_sunset_local_time
+    config = load_config()
+    hour, minute = get_sunset_local_time(config)
+    offset = config.get("sunset_offset_minutes", 0)
+    tz = config.get("timezone", "America/New_York")
+    print(f"{hour:02d}:{minute:02d}")
+    print(tz)
+    print(offset)
+except ValueError as e:
+    print(f"Polar day/night: sun does not set at this location today.", file=sys.stderr)
+    sys.exit(2)
+PYEOF
+    )
+    local _py_exit=$?
+
+    if [ $_py_exit -eq 2 ]; then
+        echo "  ⚠️  Sun does not set at this location today (polar day/night)."
+        return
+    elif [ $_py_exit -ne 0 ]; then
+        echo "  ❌ Failed to calculate sunset time."
+        if [ -s /tmp/sunset_stderr ]; then
+            sed 's/^/  /' /tmp/sunset_stderr
+        fi
+        return
+    fi
+
+    local _time _tz _offset
+    _time=$(echo "$_sunset_output" | sed -n '1p')
+    _tz=$(echo "$_sunset_output" | sed -n '2p')
+    _offset=$(echo "$_sunset_output" | sed -n '3p')
+
+    echo "  🌅 Sunset today: $_time ($_tz)"
+
+    if [ "$_offset" = "0" ] || [ -z "$_offset" ]; then
+        echo "  ⏱️  No offset configured — Taps will play at sunset."
+    else
+        # Compute adjusted time, handling day wrap-around
+        local _h _m _total _ah _am
+        _h=$(echo "$_time" | cut -d: -f1)
+        _m=$(echo "$_time" | cut -d: -f2)
+        _total=$(( 10#$_h * 60 + 10#$_m + _offset ))
+        # Wrap into [0, 1440) to handle negative offsets or overflow past midnight
+        _total=$(( ((_total % 1440) + 1440) % 1440 ))
+        _ah=$(( _total / 60 ))
+        _am=$(( _total % 60 ))
+        printf "  ⏱️  Offset: %d minutes → Taps will play at %02d:%02d\n" "$_offset" "$_ah" "$_am"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+
 function test_sonos_playback() {
     echo ""
     echo "============================================"
@@ -599,7 +670,7 @@ function view_logs() {
 function show_install_required_msg() {
     echo ""
     echo "  ⚠️  This option requires a completed installation."
-    echo "  Please run \"Install\" first (option 4)."
+    echo "  Please run \"Install\" first (option 5)."
 }
 
 function detect_install_state() {
@@ -655,6 +726,7 @@ function prompt_menu() {
     # Determine per-option annotations
     local _install_label="Install (first-time setup)"
     local _list_label="List scheduled plays"
+    local _sunset_label="Show sunset time"
     local _test_label="Test Sonos playback"
     local _logs_label="View logs"
     local _upgrade_label="Upgrade (update scripts, keep config)"
@@ -663,6 +735,7 @@ function prompt_menu() {
     if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
         _install_label="Install (first-time setup)  ← start here"
         _list_label="List scheduled plays  (requires install)"
+        _sunset_label="Show sunset time  (requires install)"
         _test_label="Test Sonos playback  (requires install)"
         _logs_label="View logs  (requires install)"
         _upgrade_label="Upgrade (update scripts, keep config)  (requires install)"
@@ -675,20 +748,21 @@ function prompt_menu() {
     echo ""
     echo "  ── Read-only ──────────────────────────"
     echo "  1) $_list_label"
-    echo "  2) $_test_label"
-    echo "  3) $_logs_label"
+    echo "  2) $_sunset_label"
+    echo "  3) $_test_label"
+    echo "  4) $_logs_label"
     echo ""
     echo "  ── Configuration ──────────────────────"
-    echo "  4) $_install_label"
-    echo "  5) $_upgrade_label"
-    echo "  6) $_reconfig_label"
+    echo "  5) $_install_label"
+    echo "  6) $_upgrade_label"
+    echo "  7) $_reconfig_label"
     echo ""
     echo "  ── Danger zone ────────────────────────"
-    echo "  7) Uninstall completely"
+    echo "  8) Uninstall completely"
     echo ""
-    echo "  8) Exit without doing anything"
+    echo "  9) Exit without doing anything"
     echo ""
-    read -rp "Enter your choice [1-8]: " CHOICE
+    read -rp "Enter your choice [1-9]: " CHOICE
 }
 
 function uninstall_all() {
@@ -939,7 +1013,7 @@ while true; do
                 echo ""
                 read -rp "  Press Enter to return to menu..." _pause
             else
-                test_sonos_playback
+                show_sunset_time
                 echo ""
                 read -rp "  Press Enter to return to menu..." _pause
             fi
@@ -950,15 +1024,26 @@ while true; do
                 echo ""
                 read -rp "  Press Enter to return to menu..." _pause
             else
-                view_logs
+                test_sonos_playback
                 echo ""
                 read -rp "  Press Enter to return to menu..." _pause
             fi
             ;;
         4)
-            install_fresh
+            if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
+                show_install_required_msg
+                echo ""
+                read -rp "  Press Enter to return to menu..." _pause
+            else
+                view_logs
+                echo ""
+                read -rp "  Press Enter to return to menu..." _pause
+            fi
             ;;
         5)
+            install_fresh
+            ;;
+        6)
             if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
                 show_install_required_msg
                 echo ""
@@ -967,7 +1052,7 @@ while true; do
                 upgrade_scripts
             fi
             ;;
-        6)
+        7)
             if [ "$INSTALL_STATE" = "none" ]; then
                 show_install_required_msg
             else
@@ -982,12 +1067,12 @@ while true; do
                     log "🗓️  Regenerating systemd timer units..."
                     maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
                 else
-                    log "⚠️  Python venv not found. Run option 4 (Install) to create systemd timers."
+                    log "⚠️  Python venv not found. Run option 5 (Install) to create systemd timers."
                 fi
                 log "✅ Reconfiguration complete."
             fi
             ;;
-        7)
+        8)
             uninstall_all
             ;;
         *)
