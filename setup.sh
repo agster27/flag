@@ -760,7 +760,24 @@ function prompt_menu() {
     if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
         _ip=$(jq -r '.sonos_ip // "not set"' "$CONFIG_FILE" 2>/dev/null)
         _cnt=$(jq '.schedules | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
-        echo "  Config:  Sonos IP: $_ip | $_cnt schedule(s)"
+        _speaker_name=""
+        if [ -d "$VENV_DIR" ] && [ "$_ip" != "not set" ]; then
+            _speaker_name=$("$VENV_DIR/bin/python" -c "
+import sys, socket
+socket.setdefaulttimeout(2)
+import soco
+try:
+    s = soco.SoCo(sys.argv[1])
+    print(s.player_name)
+except Exception:
+    pass
+" "$_ip" 2>/dev/null) || true
+        fi
+        if [ -n "$_speaker_name" ]; then
+            echo "  Config:  Sonos: $_speaker_name ($_ip) | $_cnt schedule(s)"
+        else
+            echo "  Config:  Sonos IP: $_ip | $_cnt schedule(s)"
+        fi
     fi
 
     get_sunset_header_line || true
