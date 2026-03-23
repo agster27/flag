@@ -662,8 +662,10 @@ function list_scheduled_plays() {
 
     echo ""
     echo "  --- Systemd Timer Status ---"
-    if systemctl list-timers --all 2>/dev/null | grep -q "flag"; then
-        systemctl list-timers --all 2>/dev/null | grep -E "(NEXT|flag)" | sed 's/^/  /'
+    local _timer_output
+    _timer_output=$(systemctl list-timers --all 2>/dev/null || true)
+    if echo "$_timer_output" | grep -q "flag"; then
+        echo "$_timer_output" | grep -E "(NEXT|flag)" | sed 's/^/  /'
     else
         echo "  (no flag timers found — run Install or Reconfigure to create them)"
     fi
@@ -721,7 +723,9 @@ function detect_install_state() {
 
     [ -d "$VENV_DIR" ] && has_venv=true || true
     [ -f "$CONFIG_FILE" ] && has_config=true || true
-    ls /etc/systemd/system/flag-*.timer 2>/dev/null | grep -q . && has_timers=true || true
+    local _timer_files
+    _timer_files=$(ls /etc/systemd/system/flag-*.timer 2>/dev/null || true)
+    [ -n "$_timer_files" ] && has_timers=true || true
 
     if ! $has_venv && ! $has_config; then
         INSTALL_STATE="none"
