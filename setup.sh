@@ -255,16 +255,8 @@ function configure_setup() {
         echo "  ⚠️  Please enter a number between 0 and 100."
     done
 
-    # Wait seconds
-    default_wait=$(cfg_default "default_wait_seconds" "60")
-    while true; do
-        read -rp "  Default wait seconds between tracks [${default_wait}]: " INPUT
-        WAIT_SECS="${INPUT:-$default_wait}"
-        if [[ "$WAIT_SECS" =~ ^[0-9]+$ ]]; then
-            break
-        fi
-        echo "  ⚠️  Please enter a non-negative integer."
-    done
+    # Wait seconds (fallback only — not exposed in wizard)
+    WAIT_SECS=$(cfg_default "default_wait_seconds" "60")
 
     # Skip restore if idle — normalise to lowercase true/false
     default_skip=$(cfg_default "skip_restore_if_idle" "true")
@@ -673,7 +665,7 @@ function list_scheduled_plays() {
     if systemctl list-timers --all 2>/dev/null | grep -q "flag"; then
         systemctl list-timers --all 2>/dev/null | grep -E "(NEXT|flag)" | sed 's/^/  /'
     else
-        echo "  (no flag timers found)"
+        echo "  (no flag timers found — run Install or Reconfigure to create them)"
     fi
 
     echo ""
