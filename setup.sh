@@ -533,6 +533,57 @@ PYEOF
 }
 
 # ---------------------------------------------------------------------------
+# Populate SUNSET_HEADER_LINE with a one-line sunset summary for the menu
+# header, or leave it empty if sunset cannot be determined.
+# ---------------------------------------------------------------------------
+
+function get_sunset_header_line() {
+    SUNSET_HEADER_LINE=""
+
+    [ -d "$VENV_DIR" ] || return
+    [ -f "$CONFIG_FILE" ] || return
+
+    local _sunset_output
+    _sunset_output=$(cd "$INSTALL_DIR" && "$VENV_DIR/bin/python" - <<'PYEOF' 2>/dev/null
+import sys
+try:
+    from config import load_config
+    from schedule_sonos import get_sunset_local_time
+    config = load_config()
+    hour, minute = get_sunset_local_time(config)
+    offset = config.get("sunset_offset_minutes", 0)
+    tz = config.get("timezone", "America/New_York")
+    print(f"{hour:02d}:{minute:02d}")
+    print(tz)
+    print(offset)
+except Exception:
+    sys.exit(1)
+PYEOF
+    ) || return
+
+    local _time _tz _offset
+    _time=$(echo "$_sunset_output" | sed -n '1p')
+    _tz=$(echo "$_sunset_output" | sed -n '2p')
+    _offset=$(echo "$_sunset_output" | sed -n '3p')
+
+    [ -n "$_time" ] || return
+
+    if [ "$_offset" = "0" ] || [ -z "$_offset" ]; then
+        SUNSET_HEADER_LINE="  Sunset:  🌅 $_time ($_tz)"
+    else
+        # Compute adjusted time, handling day wrap-around
+        local _h _m _total _ah _am
+        _h=$(echo "$_time" | cut -d: -f1)
+        _m=$(echo "$_time" | cut -d: -f2)
+        _total=$(( 10#$_h * 60 + 10#$_m + _offset ))
+        _total=$(( ((_total % 1440) + 1440) % 1440 ))
+        _ah=$(( _total / 60 ))
+        _am=$(( _total % 60 ))
+        SUNSET_HEADER_LINE=$(printf "  Sunset:  🌅 %s → Taps at %02d:%02d (offset: %d min)" "$_time" "$_ah" "$_am" "$_offset")
+    fi
+}
+
+# ---------------------------------------------------------------------------
 
 function test_sonos_playback() {
     echo ""
@@ -700,21 +751,24 @@ function detect_install_state() {
 
 function prompt_menu() {
     echo ""
-    echo "╔══════════════════════════════════════════╗"
-    echo "║     Honor Tradition with Tech — Setup    ║"
-    printf "║     Version %-29s ║\n" "$SETUP_VERSION"
+    echo "============================================"
+    echo "  Honor Tradition with Tech — Setup"
+    echo "============================================"
+    echo "  Version: $SETUP_VERSION"
     if [ -d "$VENV_DIR" ]; then
-        echo "║     Status: ✅ Installed                  ║"
+        echo "  Status:  ✅ Installed"
     else
-        echo "║     Status: ⚙️  Not installed               ║"
+        echo "  Status:  ⚙️  Not installed"
     fi
-    echo "╚══════════════════════════════════════════╝"
 
     if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
         _ip=$(jq -r '.sonos_ip // "not set"' "$CONFIG_FILE" 2>/dev/null)
         _cnt=$(jq '.schedules | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
-        echo "  Config: Sonos IP: $_ip | $_cnt schedule(s)"
+        echo "  Config:  Sonos IP: $_ip | $_cnt schedule(s)"
     fi
+
+    get_sunset_header_line
+    [ -n "$SUNSET_HEADER_LINE" ] && echo "$SUNSET_HEADER_LINE"
 
     if [ "$INSTALL_STATE" != "installed" ]; then
         echo ""
