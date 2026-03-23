@@ -767,7 +767,7 @@ function prompt_menu() {
         echo "  Config:  Sonos IP: $_ip | $_cnt schedule(s)"
     fi
 
-    get_sunset_header_line
+    get_sunset_header_line || true
     [ -n "$SUNSET_HEADER_LINE" ] && echo "$SUNSET_HEADER_LINE" || true
 
     if [ "$INSTALL_STATE" != "installed" ]; then
