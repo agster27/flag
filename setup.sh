@@ -729,7 +729,7 @@ function detect_install_state() {
 
     [ -d "$VENV_DIR" ] && has_venv=true
     [ -f "$CONFIG_FILE" ] && has_config=true
-    ls /etc/systemd/system/flag-*.timer 2>/dev/null | grep -q . && has_timers=true
+    ls /etc/systemd/system/flag-*.timer 2>/dev/null | grep -q . && has_timers=true || true
 
     if ! $has_venv && ! $has_config; then
         INSTALL_STATE="none"
