@@ -403,6 +403,27 @@ def _run_systemctl(*args):
         )
 
 
+def _is_timer_enabled(timer):
+    """
+    Return ``True`` if *timer* is already enabled in systemd.
+
+    Uses ``systemctl is-enabled`` which exits with code 0 for ``"enabled"``
+    and non-zero for ``"disabled"``, ``"static"``, etc.
+
+    Args:
+        timer (str): Unit name, e.g. ``"flag-taps.timer"``.
+
+    Returns:
+        bool: ``True`` if the timer is enabled, ``False`` otherwise.
+    """
+    result = subprocess.run(
+        ["systemctl", "is-enabled", timer],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
 def _clean_stale_units(current_names):
     """
     Disable and remove any ``flag-*.timer`` / ``flag-*.service`` unit files
@@ -464,7 +485,15 @@ def main():
     6. Remove any stale ``flag-*.timer`` / ``flag-*.service`` unit files that
        are no longer in the current schedule list.
     7. Run ``systemctl daemon-reload``; print a clear error and exit on failure.
-    8. Enable and start all new timers with ``systemctl enable --now``.
+    8. For each timer, check whether it is already enabled via
+       ``systemctl is-enabled``:
+
+       - **Already enabled**: run ``systemctl restart`` so systemd re-reads
+         the updated ``OnCalendar`` value without triggering a
+         ``Persistent=true`` catch-up for any past calendar events.
+       - **Not yet enabled**: run ``systemctl enable --now`` as on a first
+         install so the timer is both enabled and started.
+
     9. Print a summary of installed timers.
 
     Raises:
@@ -593,14 +622,24 @@ def main():
 
     # --- Enable and start all timers ---
     # Order matters: daemon-reload must have completed before enabling.
-    timers_to_enable = [f"flag-{name}.timer" for name in sorted(written_names)]
-    timers_to_enable.append("flag-reschedule.timer")
-    for timer in timers_to_enable:
+    # For timers that are already enabled we only restart them so that systemd
+    # re-reads the updated OnCalendar value.  Re-running "enable --now" on an
+    # already-enabled timer with Persistent=true would cause systemd to
+    # treat any past calendar event (e.g. yesterday's sunset) as "missed" and
+    # fire the service immediately as a catch-up (the root cause of taps
+    # playing at 02:00 instead of at sunset).
+    timers_to_activate = [f"flag-{name}.timer" for name in sorted(written_names)]
+    timers_to_activate.append("flag-reschedule.timer")
+    for timer in timers_to_activate:
         try:
-            _run_systemctl("enable", "--now", timer)
-            print(f"  ✅ Enabled and started: {timer}")
+            if _is_timer_enabled(timer):
+                _run_systemctl("restart", timer)
+                print(f"  ✅ Restarted (already enabled): {timer}")
+            else:
+                _run_systemctl("enable", "--now", timer)
+                print(f"  ✅ Enabled and started: {timer}")
         except RuntimeError as exc:
-            print(f"  ⚠️  Could not enable {timer}: {exc}")
+            print(f"  ⚠️  Could not activate {timer}: {exc}")
 
     # --- Summary ---
     print("")
