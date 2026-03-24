@@ -5,6 +5,51 @@ Accepts a single audio URL argument, snapshots the current Sonos state,
 plays the requested file, waits for playback to finish, and optionally
 restores the previous state. All events are logged to LOG_FILE.
 """
+
+# =============================================================================
+# QA TESTING CHECKLIST
+# =============================================================================
+# Manually verify the following scenarios before releasing to production.
+#
+# SCENARIO 1: Speaker is standalone (not in any group)
+#   [ ] Bugle call plays on the configured speaker at the configured volume.
+#   [ ] If music was playing before, it resumes after the bugle call finishes.
+#   [ ] If the speaker was idle and skip_restore_if_idle=true (default), the
+#       speaker remains idle after the bugle call (no restore).
+#
+# SCENARIO 2: Speaker is in a group and music IS playing
+#   [ ] The group's music is paused immediately (coordinator.pause() is called).
+#   [ ] The target speaker unjoins the group (it becomes a standalone player).
+#   [ ] The bugle call plays ONLY on the target speaker (not the whole group).
+#   [ ] Other speakers in the group remain silent during the bugle call.
+#   [ ] After playback, the target speaker rejoins the original group.
+#   [ ] The group's music resumes from where it left off (snapshot restored).
+#
+# SCENARIO 3: Speaker is in a group and music is NOT playing (idle group)
+#   [ ] The target speaker unjoins the group.
+#   [ ] The bugle call plays ONLY on the target speaker.
+#   [ ] After playback, the target speaker rejoins the original group.
+#   [ ] If skip_restore_if_idle=true (default), the group stays idle (no restore).
+#   [ ] If skip_restore_if_idle=false, the snapshot is restored anyway.
+#
+# SCENARIO 4: Speaker IS the coordinator of a group
+#   [ ] Same group-aware flow as Scenario 2/3: the coordinator unjoins the group
+#       (becoming standalone), plays the bugle call, then rejoins.
+#   [ ] After rejoin and restore, the group reforms correctly and playback
+#       resumes if it was active before.
+#
+# SCENARIO 5: Error handling / resilience
+#   [ ] If an error occurs during play_uri or sleep, the speaker still attempts
+#       to rejoin its original group (try/finally ensures this).
+#   [ ] If the rejoin itself fails, the error is logged clearly so the user
+#       can diagnose the issue manually.
+#   [ ] The outer error handler logs the playback error with full details.
+#
+# SCENARIO 6: Volume handling
+#   [ ] The bugle call plays at the volume specified in config.json.
+#   [ ] After restore, the speaker's volume returns to what it was before
+#       (volume is part of the snapshot that is restored).
+# =============================================================================
 import argparse
 import os
 import sys
@@ -65,9 +110,19 @@ def main():
     Entry point: parse arguments, play the requested audio on Sonos, and restore state.
 
     Reads configuration from config.json, snapshots the current Sonos playback
-    state, plays the given audio URL at the configured volume, waits for the
-    track to finish, and restores previous playback unless the speaker was idle
-    and skip_restore_if_idle is enabled.
+    state, plays the given audio URL at the configured volume on the target
+    speaker only, waits for the track to finish, and restores previous playback
+    unless the speaker was idle and skip_restore_if_idle is enabled.
+
+    When the target speaker is part of a group the function:
+      1. Pauses the group's music on the coordinator.
+      2. Unjoins the target speaker so it becomes a standalone player.
+      3. Plays the bugle call on that speaker alone.
+      4. Rejoins the speaker to its original group.
+      5. Restores the coordinator's snapshot (resumes the song if one was playing).
+
+    When the target speaker is already standalone the original single-speaker
+    flow is used (snapshot → stop → play → restore).
     """
     parser = argparse.ArgumentParser(description="Play an audio URL on a Sonos speaker.")
     parser.add_argument("audio_url", help="URL of the MP3 file to play")
@@ -115,25 +170,68 @@ def main():
         log(f"INFO: Took snapshot of {coordinator.player_name} (was_playing={was_playing})")
         print(f"  ⏳ Connected to {coordinator.player_name}.")
 
-        coordinator.stop()
-        coordinator.volume = volume
+        group_members = speaker.group.members
+        is_grouped = len(group_members) > 1
 
-        coordinator.play_uri(audio_url)
-        log(f"SUCCESS: Played {audio_url} on {coordinator.player_name}")
+        if is_grouped:
+            log(f"INFO: Speaker {speaker.player_name} is in a group of {len(group_members)} members. Will play solo.")
 
-        print("  ⏳ Fetching audio duration...")
-        duration = get_mp3_duration(audio_url, default_wait)
-        log(f"INFO: Waiting {duration} seconds for playback to finish")
-        print(f"  ▶️  Playing — waiting ~{duration} seconds for playback to finish...")
-        time.sleep(duration)
+            if was_playing:
+                coordinator.pause()
+                log(f"INFO: Paused group playback on {coordinator.player_name}")
 
-        if was_playing or not skip_restore_if_idle:
-            snapshot.restore()
-            log(f"INFO: Restored previous playback on {coordinator.player_name}")
-            print("  ✅ Playback complete. State restored.")
+            speaker.unjoin()
+            log(f"INFO: Unjoined {speaker.player_name} from group")
+            time.sleep(1)
+
+            try:
+                speaker.volume = volume
+                speaker.play_uri(audio_url)
+                log(f"SUCCESS: Played {audio_url} on {speaker.player_name}")
+
+                print("  ⏳ Fetching audio duration...")
+                duration = get_mp3_duration(audio_url, default_wait)
+                log(f"INFO: Waiting {duration} seconds for playback to finish")
+                print(f"  ▶️  Playing — waiting ~{duration} seconds for playback to finish...")
+                time.sleep(duration)
+
+                speaker.stop()
+                log(f"INFO: Stopped playback on {speaker.player_name}")
+            finally:
+                try:
+                    speaker.join(coordinator)
+                    log(f"INFO: Rejoined {speaker.player_name} to group coordinator {coordinator.player_name}")
+                    time.sleep(1)
+                except Exception as join_err:
+                    log(f"ERROR: Failed to rejoin {speaker.player_name} to group: {join_err}. Manual intervention may be required to rejoin the speaker to its group.")
+
+            if was_playing or not skip_restore_if_idle:
+                snapshot.restore()
+                log(f"INFO: Restored previous playback on {coordinator.player_name}")
+                print("  ✅ Playback complete. State restored.")
+            else:
+                log("INFO: No prior playback. Skipping restore.")
+                print("  ✅ Playback complete. (No prior playback — skipping restore.)")
         else:
-            log("INFO: No prior playback. Skipping restore.")
-            print("  ✅ Playback complete. (No prior playback — skipping restore.)")
+            coordinator.stop()
+            coordinator.volume = volume
+
+            coordinator.play_uri(audio_url)
+            log(f"SUCCESS: Played {audio_url} on {coordinator.player_name}")
+
+            print("  ⏳ Fetching audio duration...")
+            duration = get_mp3_duration(audio_url, default_wait)
+            log(f"INFO: Waiting {duration} seconds for playback to finish")
+            print(f"  ▶️  Playing — waiting ~{duration} seconds for playback to finish...")
+            time.sleep(duration)
+
+            if was_playing or not skip_restore_if_idle:
+                snapshot.restore()
+                log(f"INFO: Restored previous playback on {coordinator.player_name}")
+                print("  ✅ Playback complete. State restored.")
+            else:
+                log("INFO: No prior playback. Skipping restore.")
+                print("  ✅ Playback complete. (No prior playback — skipping restore.)")
 
     except Exception as e:
         log(f"ERROR: Failed during scheduled play - {e}")
