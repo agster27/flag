@@ -323,6 +323,34 @@ class TestErrorHandlingDuringPlayback(unittest.TestCase):
 
         self.target.join.assert_called_once()
 
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    @patch("sonos_play.load_config", return_value=_base_config())
+    def test_stop_fallback_to_group_coordinator(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """If stop() raises a coordinator-only error, fall back to group.coordinator.stop()."""
+        # Reset play_uri to succeed (override setUp's side_effect)
+        self.target.play_uri.side_effect = None
+        # stop() raises the Sonos coordinator-only error
+        self.target.stop.side_effect = Exception(
+            'The method or property "stop" can only be called/used on the coordinator in a group'
+        )
+        mock_soco.return_value = self.target
+        mock_snap_cls.return_value = MagicMock()
+
+        with patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()  # must not raise
+
+        # Primary stop was attempted on the target speaker
+        self.target.stop.assert_called_once()
+        # Fallback: coordinator.stop() was called
+        self.coordinator.stop.assert_called_once()
+        # Cleanup still proceeds: join is called
+        self.target.join.assert_called_once_with(self.coordinator)
+
 
 class TestSleepDelaysAroundGroupChanges(unittest.TestCase):
     """Verify that time.sleep(1) is called after unjoin and after join."""

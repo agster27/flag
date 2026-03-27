@@ -277,6 +277,10 @@ def _build_service_unit(name, audio_url):
     after playing), declares a dependency on network connectivity, and waits for
     ``flag-audio-http.service`` (the HTTP audio server) to be up before starting.
 
+    A non-blocking ``flock`` on ``/run/flag.lock`` is used as a single-instance
+    guard: if another scheduled play is already running, the second invocation
+    exits immediately without playing (preventing overlapping group/stop errors).
+
     Args:
         name (str): Sanitised schedule name (used only in ``Description``).
         audio_url (str): Full HTTP URL of the MP3 to play.
@@ -292,18 +296,20 @@ def _build_service_unit(name, audio_url):
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
-        f'ExecStart={PYTHON_BIN} {SONOS_PLAY} "{audio_url}"\n'
+        f'ExecStart=/usr/bin/flock -n /run/flag.lock {PYTHON_BIN} {SONOS_PLAY} "{audio_url}"\n'
         "User=root\n"
     )
 
 
-def _build_timer_unit(name, hour, minute):
+def _build_timer_unit(name, hour, minute, persistent=True):
     """
     Return the content of a systemd ``.timer`` unit that fires at a given local time.
 
     ``Persistent=true`` ensures that a missed firing (e.g. because the Raspberry
-    Pi was off) is executed on the next boot. ``WantedBy=timers.target`` is
-    required so that ``systemctl enable`` works correctly.
+    Pi was off) is executed on the next boot.  Set ``persistent=False`` for
+    sunset-based schedules so that a missed sunset is **not** replayed later
+    (e.g. at 02:00 after a reboot).  ``WantedBy=timers.target`` is required so
+    that ``systemctl enable`` works correctly.
 
     systemd interprets ``OnCalendar=`` times in the system's local timezone
     (configured via ``/etc/localtime`` or ``TZ``), so no UTC conversion is needed
@@ -313,17 +319,21 @@ def _build_timer_unit(name, hour, minute):
         name (str): Sanitised schedule name (used only in ``Description``).
         hour (int): Local hour to fire (0–23).
         minute (int): Local minute to fire (0–59).
+        persistent (bool): Whether to set ``Persistent=true`` in the timer unit.
+            Defaults to ``True``.  Pass ``False`` for sunset-based schedules to
+            prevent catch-up fires after a missed sunset.
 
     Returns:
         str: Unit file content ready to be written to disk.
     """
+    persistent_val = "true" if persistent else "false"
     return (
         "[Unit]\n"
         f"Description=Flag Audio Timer — {name}\n"
         "\n"
         "[Timer]\n"
         f"OnCalendar=*-*-* {hour:02d}:{minute:02d}:00\n"
-        "Persistent=true\n"
+        f"Persistent={persistent_val}\n"
         "\n"
         "[Install]\n"
         "WantedBy=timers.target\n"
@@ -583,7 +593,10 @@ def main():
 
         # Atomic writes — if either raises, the exception propagates to the caller
         _write_unit_file(service_path, _build_service_unit(name, audio_url))
-        _write_unit_file(timer_path, _build_timer_unit(name, hour, minute))
+        _write_unit_file(
+            timer_path,
+            _build_timer_unit(name, hour, minute, persistent=(time_str != "sunset")),
+        )
 
         written_names.add(name)
         time_display = (
