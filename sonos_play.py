@@ -195,8 +195,30 @@ def main():
                 print(f"  ▶️  Playing — waiting ~{duration} seconds for playback to finish...")
                 time.sleep(duration)
 
-                speaker.stop()
-                log(f"INFO: Stopped playback on {speaker.player_name}")
+                try:
+                    speaker.stop()
+                    log(f"INFO: Stopped playback on {speaker.player_name}")
+                except Exception as stop_err:
+                    # Sonos raises a generic exception with this message when stop()
+                    # is called on a non-coordinator group member.  soco does not
+                    # expose a dedicated exception type for this case, so we
+                    # identify it by the canonical message fragment "coordinator".
+                    if "coordinator" in str(stop_err).lower():
+                        # Speaker was re-grouped before stop(); fall back to the
+                        # current group coordinator (safe for all group members).
+                        try:
+                            speaker.group.coordinator.stop()
+                            log(
+                                f"INFO: Stopped playback via group coordinator "
+                                f"(fallback) on {speaker.player_name}"
+                            )
+                        except Exception as coord_stop_err:
+                            log(
+                                f"WARNING: Fallback coordinator stop also failed "
+                                f"for {speaker.player_name}: {coord_stop_err}"
+                            )
+                    else:
+                        raise
             finally:
                 try:
                     speaker.join(coordinator)
