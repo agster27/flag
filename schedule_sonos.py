@@ -650,6 +650,9 @@ def main():
 
     # --- Generate a service + timer pair for each schedule entry ---
     written_names: set[str] = set()
+    # Maps schedule name → (hour, minute) for sunset-based timers so that the
+    # activation step can compare against the current time.
+    sunset_times: dict[str, tuple[int, int]] = {}
     for entry in processed:
         name = entry["name"]
         audio_url = entry["audio_url"]
@@ -705,6 +708,8 @@ def main():
         _log.debug("Wrote timer unit %s:\n%s", timer_path, timer_content.rstrip())
 
         written_names.add(name)
+        if time_str == "sunset":
+            sunset_times[name] = (hour, minute)
         time_display = (
             f"{hour:02d}:{minute:02d} {tz_name}" if time_str == "sunset"
             else f"{time_str} {tz_name}"
@@ -750,18 +755,41 @@ def main():
             timer_name = f"flag-{name}.timer"
             if name in stopped_sunset_names:
                 # Sunset timer: stopped before writing; start it now with the
-                # fresh OnCalendar value already loaded by daemon-reload.
-                _log.info(
-                    "Starting %s (sunset timer, was stopped before unit file update)",
-                    timer_name,
-                )
-                try:
-                    _run_systemctl("start", timer_name)
-                    print(f"  ✅ Started (stop→write→reload→start): {timer_name}")
-                    _log.info("Started %s successfully", timer_name)
-                except RuntimeError as exc:
-                    print(f"  ⚠️  Could not start {timer_name}: {exc}")
-                    _log.error("Could not start %s: %s", timer_name, exc)
+                # fresh OnCalendar value already loaded by daemon-reload —
+                # but only if the sunset time has not yet passed today.
+                # If it has already passed, starting the timer would cause
+                # systemd to fire it immediately (treating the elapsed
+                # OnCalendar as a missed trigger).  In that case, skip the
+                # start; the nightly 02:00 reschedule will start it fresh
+                # with tomorrow's sunset time.
+                sun_hour, sun_minute = sunset_times[name]
+                tz = pytz.timezone(tz_name)
+                now_local = datetime.now(tz)
+                now_minutes = now_local.hour * 60 + now_local.minute
+                sunset_minutes = sun_hour * 60 + sun_minute
+                sunset_passed = now_minutes >= sunset_minutes
+                if sunset_passed:
+                    _log.info(
+                        "Skipping start of %s — sunset time %02d:%02d has already "
+                        "passed today; will be recalculated at next 02:00 reschedule",
+                        timer_name, sun_hour, sun_minute,
+                    )
+                    print(
+                        f"  ⏭️  Skipped (sunset already passed): {timer_name} "
+                        f"— will restart at 02:00 reschedule"
+                    )
+                else:
+                    _log.info(
+                        "Starting %s (sunset timer, was stopped before unit file update)",
+                        timer_name,
+                    )
+                    try:
+                        _run_systemctl("start", timer_name)
+                        print(f"  ✅ Started (stop→write→reload→start): {timer_name}")
+                        _log.info("Started %s successfully", timer_name)
+                    except RuntimeError as exc:
+                        print(f"  ⚠️  Could not start {timer_name}: {exc}")
+                        _log.error("Could not start %s: %s", timer_name, exc)
             else:
                 # Fixed-time timer: safe to restart because OnCalendar (e.g.
                 # 08:00) has not yet elapsed at the 02:00 reschedule time.
