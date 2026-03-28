@@ -1,7 +1,7 @@
 {
   "sonos_ip": "10.0.40.86",
   "port": 8000,
-  "volume": 30,
+  "volume": 10,
   "default_wait_seconds": 60,
   "skip_restore_if_idle": true,
   "latitude": 42.1,
