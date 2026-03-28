@@ -16,6 +16,7 @@ synthetic schedule list is built automatically.
 """
 
 import glob as _glob
+import logging
 import os
 import re
 import subprocess
@@ -27,7 +28,9 @@ from astral import LocationInfo
 from astral.sun import sun
 import pytz
 
-from config import load_config, INSTALL_DIR
+from config import load_config, INSTALL_DIR, LOG_FILE  # noqa: F401 (LOG_FILE triggers basicConfig)
+
+_log = logging.getLogger("schedule_sonos")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -405,12 +408,18 @@ def _run_systemctl(*args):
             error message.
     """
     cmd = ["systemctl"] + list(args)
+    _log.debug("Running: systemctl %s", " ".join(args))
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
+        _log.debug(
+            "systemctl %s failed (exit %d): %s",
+            " ".join(args), result.returncode, result.stderr.strip(),
+        )
         raise RuntimeError(
             f"systemctl {' '.join(args)} failed (exit {result.returncode}):\n"
             f"{result.stderr.strip()}"
         )
+    _log.debug("systemctl %s: OK", " ".join(args))
 
 
 def _is_timer_enabled(timer):
@@ -431,7 +440,33 @@ def _is_timer_enabled(timer):
         capture_output=True,
         text=True,
     )
-    return result.returncode == 0
+    enabled = result.returncode == 0
+    _log.debug("Timer %s is %s", timer, "enabled" if enabled else "not enabled")
+    return enabled
+
+
+def _is_reschedule_run(schedule_names):
+    """
+    Return ``True`` if all schedule timers are already enabled (nightly reschedule run).
+
+    When all ``flag-{name}.timer`` units are already enabled, this script is being
+    invoked by the nightly ``flag-reschedule.timer`` to recalculate sunset times.
+    In this mode the safer stop→write→reload→start sequence is used for sunset
+    timers, and ``flag-reschedule.timer`` is *not* restarted (to avoid the
+    self-referential restart that causes taps to fire at 02:00).
+
+    When one or more schedule timers are *not* yet enabled, this is a first-install
+    run; use ``enable --now`` for all timers including ``flag-reschedule.timer``.
+
+    Args:
+        schedule_names (list[str]): Sanitised schedule names to check.
+
+    Returns:
+        bool: ``True`` if all ``flag-{name}.timer`` units are enabled.
+    """
+    if not schedule_names:
+        return False
+    return all(_is_timer_enabled(f"flag-{name}.timer") for name in schedule_names)
 
 
 def _clean_stale_units(current_names):
@@ -487,24 +522,29 @@ def main():
        ``/etc/systemd/system/``).
     2. Load ``config.json`` and resolve the ``schedules`` list (with
        backward-compatibility for the old flat-key format).
-    3. Validate and sanitise each schedule name; raise on duplicates.
-    4. For each schedule, compute the fire time (fixed HH:MM or today's
+    3. Detect whether this is a reschedule run (all timers already enabled)
+       or a first-install run.
+    4. For reschedule runs, stop any sunset-based timers *before* writing the
+       new unit files (stop→write→reload→start avoids systemd seeing a stale
+       ``OnCalendar`` value during the transition).
+    5. For each schedule, compute the fire time (fixed HH:MM or today's
        sunset in local time) and write a ``.service`` + ``.timer`` pair
        atomically.
-    5. Write the ``flag-reschedule`` service/timer pair (daily at 02:00).
-    6. Remove any stale ``flag-*.timer`` / ``flag-*.service`` unit files that
+    6. Write the ``flag-reschedule`` service/timer pair (daily at 02:00).
+    7. Remove any stale ``flag-*.timer`` / ``flag-*.service`` unit files that
        are no longer in the current schedule list.
-    7. Run ``systemctl daemon-reload``; print a clear error and exit on failure.
-    8. For each timer, check whether it is already enabled via
-       ``systemctl is-enabled``:
+    8. Run ``systemctl daemon-reload``; print a clear error and exit on failure.
+    9. Activate timers:
 
-       - **Already enabled**: run ``systemctl restart`` so systemd re-reads
-         the updated ``OnCalendar`` value without triggering a
-         ``Persistent=true`` catch-up for any past calendar events.
-       - **Not yet enabled**: run ``systemctl enable --now`` as on a first
-         install so the timer is both enabled and started.
+       - **Reschedule run**: start previously-stopped sunset timers; restart
+         fixed-time timers.  ``flag-reschedule.timer`` is *skipped* — it is
+         always hardcoded to 02:00 and restarting your own parent timer with
+         ``Persistent=true`` at the exact ``OnCalendar`` time can cause
+         systemd to treat the just-elapsed event as "missed" and fire again.
+       - **First-install run**: run ``systemctl enable --now`` for all timers
+         including ``flag-reschedule.timer``.
 
-    9. Print a summary of installed timers.
+    10. Print a summary of installed timers.
 
     Raises:
         SystemExit: On ``daemon-reload`` failure, duplicate schedule names,
@@ -518,13 +558,22 @@ def main():
         )
 
     config = load_config()
+
+    # Apply debug log level before anything else so early messages are captured
+    if config.get("debug", False):
+        logging.getLogger().setLevel(logging.DEBUG)
+        _log.debug("Debug logging enabled via config.json 'debug': true")
+
     # Ensure timezone is set in config so all downstream functions use the same value
     if not config.get("timezone"):
         config["timezone"] = get_system_timezone()
     tz_name = config["timezone"]
 
+    _log.info("schedule_sonos.py started (timezone=%s)", tz_name)
+
     schedules = resolve_schedules(config)
     if not schedules:
+        _log.warning("No schedules found in config.json. Nothing to schedule.")
         print("⚠️  No schedules found in config.json. Nothing to schedule.")
         return
 
@@ -554,6 +603,49 @@ def main():
             "time": time_val,
         })
 
+    # --- Detect reschedule vs first-install mode ---
+    # If all schedule timers are already enabled this is a nightly reschedule
+    # run (invoked by flag-reschedule.timer).  Otherwise it is a first install.
+    processed_names = [entry["name"] for entry in processed]
+    is_reschedule = _is_reschedule_run(processed_names)
+    if is_reschedule:
+        _log.info(
+            "Run reason: reschedule — all %d schedule timer(s) already enabled; "
+            "will stop sunset timers before rewriting unit files and skip "
+            "flag-reschedule.timer restart",
+            len(processed_names),
+        )
+    else:
+        _log.info(
+            "Run reason: first install — one or more schedule timers not yet "
+            "enabled; will use 'enable --now' for all timers including "
+            "flag-reschedule.timer"
+        )
+
+    # --- For reschedule runs: stop sunset timers BEFORE writing new unit files ---
+    # This ensures systemd never sees a stale OnCalendar value during the
+    # file-swap.  Sequence: stop → write new file → daemon-reload → start.
+    stopped_sunset_names: set[str] = set()
+    if is_reschedule:
+        for entry in processed:
+            if entry["time"] == "sunset":
+                timer_name = f"flag-{entry['name']}.timer"
+                _log.info(
+                    "Stopping %s before writing updated unit file "
+                    "(stop→write→reload→start sequence)",
+                    timer_name,
+                )
+                try:
+                    _run_systemctl("stop", timer_name)
+                    _log.info("Stopped %s successfully", timer_name)
+                except RuntimeError as exc:
+                    _log.warning(
+                        "Could not stop %s (may already be stopped): %s",
+                        timer_name, exc,
+                    )
+                # Always add to the set so we attempt to start it after reload
+                stopped_sunset_names.add(entry["name"])
+
     print("Writing systemd unit files...")
 
     # --- Generate a service + timer pair for each schedule entry ---
@@ -572,7 +664,13 @@ def main():
                 print(
                     f"  ⚠️  Skipping '{name}': cannot compute sunset for today — {exc}"
                 )
+                _log.warning("Skipping '%s': cannot compute sunset for today — %s", name, exc)
                 continue
+            _log.info(
+                "Schedule '%s': sunset at %02d:%02d %s "
+                "(OnCalendar=*-*-* %02d:%02d:00, Persistent=false)",
+                name, hour, minute, tz_name, hour, minute,
+            )
         else:
             try:
                 parts = time_str.split(":")
@@ -586,17 +684,25 @@ def main():
                     f"  ⚠️  Skipping '{name}': invalid time format '{time_str}' "
                     "(expected HH:MM with hour 0–23 and minute 0–59, or 'sunset')"
                 )
+                _log.warning(
+                    "Skipping '%s': invalid time format '%s'", name, time_str,
+                )
                 continue
+            _log.info(
+                "Schedule '%s': fixed time %s %s "
+                "(OnCalendar=*-*-* %02d:%02d:00, Persistent=true)",
+                name, time_str, tz_name, hour, minute,
+            )
 
         service_path = os.path.join(SYSTEMD_DIR, f"flag-{name}.service")
         timer_path = os.path.join(SYSTEMD_DIR, f"flag-{name}.timer")
 
+        timer_content = _build_timer_unit(name, hour, minute, persistent=(time_str != "sunset"))
+
         # Atomic writes — if either raises, the exception propagates to the caller
         _write_unit_file(service_path, _build_service_unit(name, audio_url))
-        _write_unit_file(
-            timer_path,
-            _build_timer_unit(name, hour, minute, persistent=(time_str != "sunset")),
-        )
+        _write_unit_file(timer_path, timer_content)
+        _log.debug("Wrote timer unit %s:\n%s", timer_path, timer_content.rstrip())
 
         written_names.add(name)
         time_display = (
@@ -627,32 +733,71 @@ def main():
 
     # --- Reload systemd daemon so it picks up the new/changed unit files ---
     # All unit files must be written before daemon-reload and enable steps.
+    _log.info("Running daemon-reload")
     try:
         _run_systemctl("daemon-reload")
     except RuntimeError as exc:
         print(f"\n  ❌ daemon-reload failed — check unit file syntax:\n  {exc}")
+        _log.error("daemon-reload failed: %s", exc)
         sys.exit(1)
 
-    # --- Enable and start all timers ---
-    # Order matters: daemon-reload must have completed before enabling.
-    # For timers that are already enabled we only restart them so that systemd
-    # re-reads the updated OnCalendar value.  Re-running "enable --now" on an
-    # already-enabled timer with Persistent=true would cause systemd to
-    # treat any past calendar event (e.g. yesterday's sunset) as "missed" and
-    # fire the service immediately as a catch-up (the root cause of taps
-    # playing at 02:00 instead of at sunset).
-    timers_to_activate = [f"flag-{name}.timer" for name in sorted(written_names)]
-    timers_to_activate.append("flag-reschedule.timer")
-    for timer in timers_to_activate:
-        try:
-            if _is_timer_enabled(timer):
-                _run_systemctl("restart", timer)
-                print(f"  ✅ Restarted (already enabled): {timer}")
+    # --- Activate timers ---
+    if is_reschedule:
+        # Reschedule run: use the stop→write→reload→start sequence for sunset
+        # timers (already stopped above), restart fixed-time timers normally,
+        # and skip flag-reschedule.timer entirely.
+        for name in sorted(written_names):
+            timer_name = f"flag-{name}.timer"
+            if name in stopped_sunset_names:
+                # Sunset timer: stopped before writing; start it now with the
+                # fresh OnCalendar value already loaded by daemon-reload.
+                _log.info(
+                    "Starting %s (sunset timer, was stopped before unit file update)",
+                    timer_name,
+                )
+                try:
+                    _run_systemctl("start", timer_name)
+                    print(f"  ✅ Started (stop→write→reload→start): {timer_name}")
+                    _log.info("Started %s successfully", timer_name)
+                except RuntimeError as exc:
+                    print(f"  ⚠️  Could not start {timer_name}: {exc}")
+                    _log.error("Could not start %s: %s", timer_name, exc)
             else:
+                # Fixed-time timer: safe to restart because OnCalendar (e.g.
+                # 08:00) has not yet elapsed at the 02:00 reschedule time.
+                _log.info("Restarting %s (fixed-time timer)", timer_name)
+                try:
+                    _run_systemctl("restart", timer_name)
+                    print(f"  ✅ Restarted (already enabled): {timer_name}")
+                    _log.info("Restarted %s successfully", timer_name)
+                except RuntimeError as exc:
+                    print(f"  ⚠️  Could not restart {timer_name}: {exc}")
+                    _log.error("Could not restart %s: %s", timer_name, exc)
+
+        # Skip flag-reschedule.timer — it is hardcoded to 02:00 and never
+        # changes, so there is nothing to update.  More importantly, restarting
+        # your own parent timer with Persistent=true at the exact OnCalendar
+        # time causes systemd to clear the last-trigger timestamp and may fire
+        # the timer again immediately as a catch-up.
+        _log.info(
+            "Skipping flag-reschedule.timer restart (reschedule run — "
+            "hardcoded 02:00 schedule never changes)"
+        )
+        print("  ✅ flag-reschedule.timer: no restart needed (reschedule run)")
+    else:
+        # First-install run: enable and start every timer, including the
+        # reschedule timer so the nightly 02:00 recalculation is registered.
+        timers_to_activate = [f"flag-{name}.timer" for name in sorted(written_names)]
+        timers_to_activate.append("flag-reschedule.timer")
+        for timer in timers_to_activate:
+            _log.info("Enabling %s (first install)", timer)
+            try:
                 _run_systemctl("enable", "--now", timer)
                 print(f"  ✅ Enabled and started: {timer}")
-        except RuntimeError as exc:
-            print(f"  ⚠️  Could not activate {timer}: {exc}")
+                _log.info("Enabled %s successfully", timer)
+            except RuntimeError as exc:
+                print(f"  ⚠️  Could not activate {timer}: {exc}")
+                _log.error("Could not enable %s: %s", timer, exc)
 
     # --- Summary ---
     print("")
@@ -664,6 +809,7 @@ def main():
     print("To verify:   systemctl list-timers --all | grep flag")
     first_name = sorted(written_names)[0] if written_names else "colors"
     print(f"To inspect:  journalctl -u flag-{first_name} -n 50")
+    _log.info("schedule_sonos.py completed successfully")
 
 
 if __name__ == "__main__":
