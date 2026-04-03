@@ -305,6 +305,9 @@ cat /opt/flag/setup.log
 - **Sunset timer shows the wrong time?**  
   The `flag-reschedule` timer recalculates sunset at 02:00 each night. To recalculate immediately:  
   `sudo /opt/flag/sonos-env/bin/python /opt/flag/schedule_sonos.py`
+- **Why doesn't the reschedule restart the sunset timer?**  
+  By design, the nightly 02:00 reschedule run stops sunset timers (e.g. `flag-taps.timer`) before rewriting their unit files, then leaves them stopped after `daemon-reload`. Starting (or restarting) a sunset timer at 02:00 causes systemd to invoke the associated service immediately at 02:00 — an unwanted early-morning audio play. The updated `OnCalendar` line is already written to disk and loaded by `daemon-reload`; systemd will activate the timer at the correct sunset time without an explicit `systemctl start`. If you ever need to immediately activate the sunset timer manually, run:  
+  `sudo systemctl start flag-taps.timer`
 
 ---
 
