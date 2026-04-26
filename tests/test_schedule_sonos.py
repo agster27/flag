@@ -84,27 +84,34 @@ class TestRescheduleRun(unittest.TestCase):
             schedule_sonos.main()
         return _systemctl_calls(mock_ctl)
 
-    def test_sunset_timer_is_started(self):
+    def test_sunset_timer_not_stopped(self):
         """
-        During a reschedule run, the sunset timer (flag-taps.timer) must be
-        *started* (not left stopped) after daemon-reload.
+        During a reschedule run the sunset timer must NOT be stopped — leaving
+        it active allows daemon-reload to re-arm it with the new OnCalendar value
+        without any spurious immediate fire.
         """
         calls = self._run_main_reschedule()
-        self.assertIn(("start", "flag-taps.timer"), calls,
-                      "Expected 'systemctl start flag-taps.timer' during reschedule run")
+        self.assertNotIn(("stop", "flag-taps.timer"), calls,
+                         "Sunset timer must not be stopped during a reschedule run")
 
-    def test_sunset_timer_is_stopped_before_write(self):
+    def test_sunset_timer_not_started(self):
         """
-        The sunset timer must be stopped *before* the unit file is rewritten
-        (stop→write→reload→start sequence).
+        During a reschedule run the sunset timer must NOT be explicitly started —
+        systemctl start on a freshly-reloaded OnCalendar timer can fire immediately
+        even with Persistent=false.  daemon-reload re-arms the already-active timer.
         """
         calls = self._run_main_reschedule()
-        stop_idx  = next((i for i, c in enumerate(calls) if c == ("stop",  "flag-taps.timer")), None)
-        start_idx = next((i for i, c in enumerate(calls) if c == ("start", "flag-taps.timer")), None)
-        self.assertIsNotNone(stop_idx,  "Expected 'systemctl stop flag-taps.timer'")
-        self.assertIsNotNone(start_idx, "Expected 'systemctl start flag-taps.timer'")
-        self.assertLess(stop_idx, start_idx,
-                        "'stop' must occur before 'start' for the sunset timer")
+        self.assertNotIn(("start", "flag-taps.timer"), calls,
+                         "Sunset timer must not be started during a reschedule run")
+
+    def test_sunset_timer_not_restarted(self):
+        """
+        During a reschedule run the sunset timer must not receive any restart
+        command — the already-active timer is re-armed by daemon-reload alone.
+        """
+        calls = self._run_main_reschedule()
+        self.assertNotIn(("restart", "flag-taps.timer"), calls,
+                         "Sunset timer must not be restarted during a reschedule run")
 
     def test_fixed_time_timer_is_restarted(self):
         """
@@ -128,15 +135,6 @@ class TestRescheduleRun(unittest.TestCase):
         ]
         self.assertEqual(reschedule_activations, [],
                          "flag-reschedule.timer must not be started/restarted during reschedule run")
-
-    def test_sunset_timer_not_restarted_with_restart(self):
-        """
-        The sunset timer should use 'start', not 'restart', during a reschedule
-        run (it was explicitly stopped beforehand).
-        """
-        calls = self._run_main_reschedule()
-        self.assertNotIn(("restart", "flag-taps.timer"), calls,
-                         "Sunset timer should use 'start', not 'restart'")
 
     def test_daemon_reload_called(self):
         """daemon-reload must be called during a reschedule run."""
@@ -199,38 +197,6 @@ class TestFirstInstallRun(unittest.TestCase):
         calls = self._run_main_first_install()
         self.assertIn(("daemon-reload",), calls,
                       "Expected 'systemctl daemon-reload'")
-
-
-# ---------------------------------------------------------------------------
-# Edge case: sunset timer start failure is non-fatal
-# ---------------------------------------------------------------------------
-
-class TestRescheduleSunsetStartFailure(unittest.TestCase):
-    """
-    When 'systemctl start flag-taps.timer' fails during a reschedule run,
-    the error must be handled gracefully (logged, printed) without propagating.
-    """
-
-    def test_start_failure_does_not_raise(self):
-        import schedule_sonos
-
-        def _fake_systemctl(*args):
-            if args == ("start", "flag-taps.timer"):
-                raise RuntimeError("Unit not found")
-            # All other calls succeed silently
-
-        with patch("os.getuid", return_value=0), \
-             patch("schedule_sonos.load_config", return_value=_base_config()), \
-             patch("schedule_sonos._write_unit_file"), \
-             patch("schedule_sonos._clean_stale_units"), \
-             patch("schedule_sonos.get_sunset_local_time", return_value=(19, 39)), \
-             patch("schedule_sonos._is_timer_enabled", return_value=True), \
-             patch("schedule_sonos._run_systemctl", side_effect=_fake_systemctl):
-            # Should not raise even though start fails
-            try:
-                schedule_sonos.main()
-            except RuntimeError:
-                self.fail("RuntimeError from sunset timer start must be caught, not propagated")
 
 
 if __name__ == "__main__":
