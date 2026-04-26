@@ -1,9 +1,10 @@
 """
-sonos_play.py — Plays an MP3 URL on a Sonos speaker and restores prior playback.
+sonos_play.py — Plays an MP3 URL on one or more Sonos speakers in synchronized playback.
 
-Accepts a single audio URL argument, snapshots the current Sonos state,
-plays the requested file, waits for playback to finish, and optionally
-restores the previous state. All events are logged to LOG_FILE.
+Accepts a single audio URL argument, temporarily groups the configured speakers,
+plays the requested file, waits for playback to finish, then dissolves the
+temporary group and restores each speaker to its prior state (group membership,
+transport state, and volume). All events are logged to LOG_FILE.
 """
 
 # =============================================================================
@@ -11,44 +12,44 @@ restores the previous state. All events are logged to LOG_FILE.
 # =============================================================================
 # Manually verify the following scenarios before releasing to production.
 #
-# SCENARIO 1: Speaker is standalone (not in any group)
-#   [ ] Bugle call plays on the configured speaker at the configured volume.
-#   [ ] If music was playing before, it resumes after the bugle call finishes.
-#   [ ] If the speaker was idle and skip_restore_if_idle=true (default), the
-#       speaker remains idle after the bugle call (no restore).
+# SCENARIO 1: All standalone, all idle
+#   [ ] N speakers, none grouped, none playing.
+#   [ ] All play in sync at the configured volume.
+#   [ ] After playback, all speakers return to idle (no restore with
+#       skip_restore_if_idle=true).
 #
-# SCENARIO 2: Speaker is in a group and music IS playing
-#   [ ] The group's music is paused immediately (coordinator.pause() is called).
-#   [ ] The target speaker unjoins the group (it becomes a standalone player).
-#   [ ] The bugle call plays ONLY on the target speaker (not the whole group).
-#   [ ] Other speakers in the group remain silent during the bugle call.
-#   [ ] After playback, the target speaker rejoins the original group.
-#   [ ] The group's music resumes from where it left off (snapshot restored).
+# SCENARIO 2: All standalone, one playing
+#   [ ] Speaker A playing music; B & C idle.
+#   [ ] All three play in sync; A resumes its music after the bugle call.
+#   [ ] B & C stay idle (skip_restore_if_idle=true).
 #
-# SCENARIO 3: Speaker is in a group and music is NOT playing (idle group)
-#   [ ] The target speaker unjoins the group.
-#   [ ] The bugle call plays ONLY on the target speaker.
-#   [ ] After playback, the target speaker rejoins the original group.
-#   [ ] If skip_restore_if_idle=true (default), the group stays idle (no restore).
-#   [ ] If skip_restore_if_idle=false, the snapshot is restored anyway.
+# SCENARIO 3: Pre-existing group with a non-target
+#   [ ] A & D grouped (D not a target), A playing music.
+#   [ ] A unjoins from D; all targets play taps in sync.
+#   [ ] After playback, A rejoins D and music resumes on the A+D group.
+#   [ ] D is unaffected throughout (only target speakers are touched).
 #
-# SCENARIO 4: Speaker IS the coordinator of a group
-#   [ ] Same group-aware flow as Scenario 2/3: the coordinator unjoins the group
-#       (becoming standalone), plays the bugle call, then rejoins.
-#   [ ] After rejoin and restore, the group reforms correctly and playback
-#       resumes if it was active before.
+# SCENARIO 4: All targets in the same pre-existing group
+#   [ ] A, B, C already grouped and playing.
+#   [ ] Only one snapshot is taken (coordinator, not three individual ones).
+#   [ ] All unjoin, play in sync, regroup with original coordinator.
+#   [ ] Music resumes after playback.
 #
-# SCENARIO 5: Error handling / resilience
-#   [ ] If an error occurs during play_uri or sleep, the speaker still attempts
-#       to rejoin its original group (try/finally ensures this).
-#   [ ] If the rejoin itself fails, the error is logged clearly so the user
-#       can diagnose the issue manually.
-#   [ ] The outer error handler logs the playback error with full details.
+# SCENARIO 5: One target offline at fire time
+#   [ ] B is unreachable — a warning is logged for B, no crash.
+#   [ ] A & C play taps in sync; exit 0.
 #
-# SCENARIO 6: Volume handling
-#   [ ] The bugle call plays at the volume specified in config.json.
-#   [ ] After restore, the speaker's volume returns to what it was before
-#       (volume is part of the snapshot that is restored).
+# SCENARIO 6: All targets offline
+#   [ ] ERROR logged; process exits non-zero so systemd marks the unit failed.
+#
+# SCENARIO 7: Bad audio URL
+#   [ ] Error is logged when play_uri fails.
+#   [ ] Every speaker still rejoins its original group correctly (try/finally
+#       ensures Phase 5–7 always execute).
+#
+# SCENARIO 8: Volume correctness
+#   [ ] Bugle plays at configured volume on every speaker.
+#   [ ] Each speaker's original volume is restored after playback.
 # =============================================================================
 import argparse
 import os
@@ -107,41 +108,45 @@ def get_mp3_duration(url, default_wait):
 
 def main():
     """
-    Entry point: parse arguments, play the requested audio on Sonos, and restore state.
+    Entry point: play the requested audio on all configured Sonos speakers in sync.
 
-    Reads configuration from config.json, snapshots the current Sonos playback
-    state, plays the given audio URL at the configured volume on the target
-    speaker only, waits for the track to finish, and restores previous playback
-    unless the speaker was idle and skip_restore_if_idle is enabled.
+    Phases:
+      0. Discovery — connect to each configured speaker IP; skip unreachable ones.
+      1. Snapshot  — capture pre-existing group state and volumes (one snapshot
+                     per pre-existing group coordinator, not per speaker).
+      2. Tear down — pause and unjoin all target speakers from their groups.
+      3. Bugle group — join all reachable speakers under one temporary coordinator.
+      4. Play      — play_uri on the coordinator; sleep for duration + 1 s.
+      5. Tear down — stop the coordinator; unjoin all bugle group members.
+      6. Restore   — rejoin original groups; call snapshot.restore() where needed.
+      7. Volumes   — restore each speaker's pre-bugle volume.
 
-    When the target speaker is part of a group the function:
-      1. Pauses the group's music on the coordinator.
-      2. Unjoins the target speaker so it becomes a standalone player.
-      3. Plays the bugle call on that speaker alone.
-      4. Rejoins the speaker to its original group.
-      5. Restores the coordinator's snapshot (resumes the song if one was playing).
-
-    When the target speaker is already standalone the original single-speaker
-    flow is used (snapshot → stop → play → restore).
+    A try/finally ensures that Phases 5–7 always execute, even when Phase 4 raises.
     """
-    parser = argparse.ArgumentParser(description="Play an audio URL on a Sonos speaker.")
+    parser = argparse.ArgumentParser(description="Play an audio URL on Sonos speakers.")
     parser.add_argument("audio_url", help="URL of the MP3 file to play")
     args = parser.parse_args()
 
     config = load_config()
 
-    # --- Validate required config keys (Issue 1) ---
-    sonos_ip = config.get("sonos_ip")
-    if sonos_ip is None or not isinstance(sonos_ip, str) or not sonos_ip.strip():
-        log("ERROR: 'sonos_ip' is missing or invalid in config.json. Aborting.")
-        sys.exit("❌ 'sonos_ip' is missing or invalid in config.json. Please run setup.sh to reconfigure.")
+    # --- Validate speakers list ---
+    speakers_cfg = config.get("speakers")
+    if not isinstance(speakers_cfg, list) or not speakers_cfg:
+        log("ERROR: 'speakers' must be a non-empty list in config.json. Aborting.")
+        sys.exit(
+            "❌ 'speakers' is missing or invalid in config.json. "
+            "Please run setup.sh to reconfigure."
+        )
 
     volume = config.get("volume")
     if volume is None or not isinstance(volume, (int, float)):
         log("ERROR: 'volume' is missing or not a number in config.json. Aborting.")
-        sys.exit("❌ 'volume' is missing or not a number in config.json. Please run setup.sh to reconfigure.")
+        sys.exit(
+            "❌ 'volume' is missing or not a number in config.json. "
+            "Please run setup.sh to reconfigure."
+        )
 
-    # --- Validate volume range (Issue 3) ---
+    # --- Validate volume range ---
     volume = int(volume)
     if not (0 <= volume <= 100):
         clamped = max(0, min(100, volume))
@@ -152,112 +157,188 @@ def main():
     skip_restore_if_idle = config.get("skip_restore_if_idle", True)
     default_wait = config.get("default_wait_seconds", 60)
 
-    # --- Validate audio_url argument (Issue 2) ---
+    # --- Validate audio_url argument ---
     audio_url = args.audio_url
     if not audio_url.startswith("http://") and not audio_url.startswith("https://"):
         log(f"ERROR: audio_url '{audio_url}' is not a valid HTTP URL. Aborting.")
         sys.exit(f"❌ audio_url must start with http:// or https://. Got: {audio_url!r}")
 
+    # =========================================================================
+    # Phase 0: Discovery & validation
+    # =========================================================================
+    reachable = []
+    for ip in speakers_cfg:
+        try:
+            sp = soco.SoCo(ip)
+            _ = sp.group  # probe connectivity; raises if the speaker is unreachable
+            reachable.append(sp)
+            log(f"INFO: Connected to speaker at {ip} ({sp.player_name})")
+        except Exception as e:
+            log(f"WARNING: Speaker at {ip} is unreachable: {e}. Skipping.")
+            print(f"  ⚠️  Speaker at {ip} is unreachable — skipping.", file=sys.stderr)
+
+    if not reachable:
+        log("ERROR: All configured speakers are unreachable. Aborting.")
+        print("  ❌ All configured speakers are unreachable.", file=sys.stderr)
+        sys.exit(1)
+
+    bugle_coordinator = reachable[0]
+    log(f"INFO: {len(reachable)} speaker(s) reachable. Bugle coordinator: {bugle_coordinator.player_name}")
+    print(f"  ⏳ Connected to {len(reachable)} speaker(s). Coordinator: {bugle_coordinator.player_name}")
+
+    # =========================================================================
+    # Phase 1: Snapshot (per pre-existing group, not per speaker)
+    # =========================================================================
+    # pre_existing_groups: coordinator_uid -> {snapshot, was_playing, member_uids, coordinator_speaker}
+    pre_existing_groups = {}
+    pre_bugle_volumes = {}  # speaker uid -> volume before we change it
+
+    for sp in reachable:
+        try:
+            pre_bugle_volumes[sp.uid] = sp.volume
+            group_coord = sp.group.coordinator
+            uid = group_coord.uid
+            if uid not in pre_existing_groups:
+                state = group_coord.get_current_transport_info()["current_transport_state"]
+                was_playing = state == "PLAYING"
+                snap = Snapshot(group_coord)
+                snap.snapshot()
+                member_uids = {m.uid for m in sp.group.members}
+                pre_existing_groups[uid] = {
+                    "snapshot": snap,
+                    "was_playing": was_playing,
+                    "member_uids": member_uids,
+                    "coordinator_speaker": group_coord,
+                }
+                log(f"INFO: Snapshot taken on {group_coord.player_name} (was_playing={was_playing})")
+        except Exception as e:
+            log(f"WARNING: Could not snapshot speaker {sp.player_name}: {e}")
+
+    log(f"INFO: Snapshot summary — {len(pre_existing_groups)} pre-existing group(s)")
+
     try:
-        speaker = soco.SoCo(sonos_ip)
-        coordinator = speaker.group.coordinator
+        # =====================================================================
+        # Phase 2: Tear down pre-existing groups
+        # =====================================================================
+        for uid, info in pre_existing_groups.items():
+            if info["was_playing"]:
+                try:
+                    info["coordinator_speaker"].pause()
+                    log(f"INFO: Paused {info['coordinator_speaker'].player_name}")
+                except Exception as e:
+                    log(f"WARNING: Could not pause {info['coordinator_speaker'].player_name}: {e}")
 
-        state = coordinator.get_current_transport_info()["current_transport_state"]
-        was_playing = state == "PLAYING"
-
-        snapshot = Snapshot(coordinator)
-        snapshot.snapshot()
-        log(f"INFO: Took snapshot of {coordinator.player_name} (was_playing={was_playing})")
-        print(f"  ⏳ Connected to {coordinator.player_name}.")
-
-        group_members = speaker.group.members
-        is_grouped = len(group_members) > 1
-
-        if is_grouped:
-            log(f"INFO: Speaker {speaker.player_name} is in a group of {len(group_members)} members. Will play solo.")
-
-            if was_playing:
-                coordinator.pause()
-                log(f"INFO: Paused group playback on {coordinator.player_name}")
-
-            speaker.unjoin()
-            log(f"INFO: Unjoined {speaker.player_name} from group")
-            time.sleep(1)
-
+        for sp in reachable:
             try:
-                speaker.volume = volume
-                speaker.play_uri(audio_url)
-                log(f"SUCCESS: Played {audio_url} on {speaker.player_name}")
+                if len(sp.group.members) > 1:
+                    sp.unjoin()
+                    log(f"INFO: Unjoined {sp.player_name} from pre-existing group")
+            except Exception as e:
+                log(f"WARNING: Could not unjoin {sp.player_name}: {e}")
 
-                print("  ⏳ Fetching audio duration...")
-                duration = get_mp3_duration(audio_url, default_wait)
-                log(f"INFO: Waiting {duration} seconds for playback to finish")
-                print(f"  ▶️  Playing — waiting ~{duration} seconds for playback to finish...")
-                time.sleep(duration)
+        time.sleep(1)
 
+        # =====================================================================
+        # Phase 3: Form temporary bugle group
+        # =====================================================================
+        bugle_coordinator.volume = volume
+        for sp in reachable[1:]:
+            try:
+                sp.join(bugle_coordinator)
+                sp.volume = volume
+                log(f"INFO: {sp.player_name} joined bugle group")
+            except Exception as e:
+                log(f"WARNING: Could not add {sp.player_name} to bugle group: {e}")
+
+        time.sleep(1)
+
+        # =====================================================================
+        # Phase 4: Play
+        # =====================================================================
+        bugle_coordinator.play_uri(audio_url)
+        log(f"SUCCESS: Playing {audio_url} on {bugle_coordinator.player_name} (and group members)")
+
+        print("  ⏳ Fetching audio duration...")
+        duration = get_mp3_duration(audio_url, default_wait)
+        wait_secs = duration + 1
+        log(f"INFO: Waiting {wait_secs} seconds for playback to finish")
+        print(f"  ▶️  Playing — waiting ~{wait_secs} seconds for playback to finish...")
+        time.sleep(wait_secs)
+
+    except Exception as play_err:
+        log(f"ERROR: Playback failed — {play_err}")
+        print(f"  ❌ Error during playback: {play_err}", file=sys.stderr)
+
+    finally:
+        # =====================================================================
+        # Phase 5: Tear down bugle group
+        # =====================================================================
+        try:
+            bugle_coordinator.stop()
+            log(f"INFO: Stopped playback on {bugle_coordinator.player_name}")
+        except Exception as stop_err:
+            # Sonos raises a generic exception with this message when stop()
+            # is called on a non-coordinator group member.  soco does not
+            # expose a dedicated exception type for this case, so we
+            # identify it by the canonical message fragment "coordinator".
+            if "coordinator" in str(stop_err).lower():
                 try:
-                    speaker.stop()
-                    log(f"INFO: Stopped playback on {speaker.player_name}")
-                except Exception as stop_err:
-                    # Sonos raises a generic exception with this message when stop()
-                    # is called on a non-coordinator group member.  soco does not
-                    # expose a dedicated exception type for this case, so we
-                    # identify it by the canonical message fragment "coordinator".
-                    if "coordinator" in str(stop_err).lower():
-                        # Speaker was re-grouped before stop(); fall back to the
-                        # current group coordinator (safe for all group members).
-                        try:
-                            speaker.group.coordinator.stop()
-                            log(
-                                f"INFO: Stopped playback via group coordinator "
-                                f"(fallback) on {speaker.player_name}"
-                            )
-                        except Exception as coord_stop_err:
-                            log(
-                                f"WARNING: Fallback coordinator stop also failed "
-                                f"for {speaker.player_name}: {coord_stop_err}"
-                            )
-                    else:
-                        raise
-            finally:
-                try:
-                    speaker.join(coordinator)
-                    log(f"INFO: Rejoined {speaker.player_name} to group coordinator {coordinator.player_name}")
-                    time.sleep(1)
-                except Exception as join_err:
-                    log(f"ERROR: Failed to rejoin {speaker.player_name} to group: {join_err}. Manual intervention may be required to rejoin the speaker to its group.")
-
-            if was_playing or not skip_restore_if_idle:
-                snapshot.restore()
-                log(f"INFO: Restored previous playback on {coordinator.player_name}")
-                print("  ✅ Playback complete. State restored.")
+                    bugle_coordinator.group.coordinator.stop()
+                    log(
+                        f"INFO: Stopped playback via group coordinator fallback "
+                        f"on {bugle_coordinator.player_name}"
+                    )
+                except Exception as coord_stop_err:
+                    log(
+                        f"WARNING: Fallback coordinator stop also failed "
+                        f"for {bugle_coordinator.player_name}: {coord_stop_err}"
+                    )
             else:
-                log("INFO: No prior playback. Skipping restore.")
-                print("  ✅ Playback complete. (No prior playback — skipping restore.)")
-        else:
-            coordinator.stop()
-            coordinator.volume = volume
+                log(f"WARNING: stop() failed on {bugle_coordinator.player_name}: {stop_err}")
 
-            coordinator.play_uri(audio_url)
-            log(f"SUCCESS: Played {audio_url} on {coordinator.player_name}")
+        for sp in reachable[1:]:
+            try:
+                sp.unjoin()
+                log(f"INFO: Unjoined {sp.player_name} from bugle group")
+            except Exception as e:
+                log(f"WARNING: Could not unjoin {sp.player_name} from bugle group: {e}")
 
-            print("  ⏳ Fetching audio duration...")
-            duration = get_mp3_duration(audio_url, default_wait)
-            log(f"INFO: Waiting {duration} seconds for playback to finish")
-            print(f"  ▶️  Playing — waiting ~{duration} seconds for playback to finish...")
-            time.sleep(duration)
+        # =====================================================================
+        # Phase 6: Restore pre-existing groups
+        # =====================================================================
+        for uid, info in pre_existing_groups.items():
+            try:
+                group_coord = info["coordinator_speaker"]
+                for sp in reachable:
+                    if sp.uid in info["member_uids"] and sp.uid != group_coord.uid:
+                        sp.join(group_coord)
+                time.sleep(1)
+                if info["was_playing"] or not skip_restore_if_idle:
+                    info["snapshot"].restore()
+                    log(
+                        f"INFO: Restored {group_coord.player_name} "
+                        f"(was_playing={info['was_playing']})"
+                    )
+                else:
+                    log(
+                        f"INFO: Skipping restore for {group_coord.player_name} "
+                        f"(was idle and skip_restore_if_idle=True)"
+                    )
+            except Exception as e:
+                log(f"ERROR: Failed to restore group for coordinator uid={uid}: {e}")
 
-            if was_playing or not skip_restore_if_idle:
-                snapshot.restore()
-                log(f"INFO: Restored previous playback on {coordinator.player_name}")
-                print("  ✅ Playback complete. State restored.")
-            else:
-                log("INFO: No prior playback. Skipping restore.")
-                print("  ✅ Playback complete. (No prior playback — skipping restore.)")
+        # =====================================================================
+        # Phase 7: Restore per-speaker volumes
+        # =====================================================================
+        for sp in reachable:
+            try:
+                if sp.uid in pre_bugle_volumes:
+                    sp.volume = pre_bugle_volumes[sp.uid]
+                    log(f"INFO: Restored volume on {sp.player_name}")
+            except Exception as e:
+                log(f"WARNING: Could not restore volume for {sp.player_name}: {e}")
 
-    except Exception as e:
-        log(f"ERROR: Failed during scheduled play - {e}")
-        print(f"  ❌ Error during playback: {e}", file=sys.stderr)
+        print("  ✅ Playback complete.")
 
 
 if __name__ == "__main__":

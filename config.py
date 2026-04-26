@@ -36,17 +36,24 @@ def validate_config(cfg: dict) -> None:
 
     Checks for required keys, correct value types, and sensible value ranges.
     Logs warnings for non-critical issues and errors for critical ones
-    (e.g. missing ``sonos_ip``).  Does **not** raise — callers decide whether
+    (e.g. missing ``speakers``).  Does **not** raise — callers decide whether
     to abort based on the log output.
 
     Args:
         cfg (dict): Configuration dictionary returned by :func:`load_config`.
     """
     # --- Required critical keys ---
-    if "sonos_ip" not in cfg:
-        _log.error("Config is missing required key 'sonos_ip'.")
-    elif not isinstance(cfg["sonos_ip"], str) or not cfg["sonos_ip"].strip():
-        _log.error("Config 'sonos_ip' must be a non-empty string; got %r.", cfg["sonos_ip"])
+    speakers = cfg.get("speakers")
+    if speakers is None:
+        _log.error("Config is missing required key 'speakers'.")
+    elif not isinstance(speakers, list) or not speakers:
+        _log.error("Config 'speakers' must be a non-empty list; got %r.", speakers)
+    else:
+        for i, ip in enumerate(speakers):
+            if not isinstance(ip, str) or not ip.strip():
+                _log.error(
+                    "Config 'speakers[%d]' must be a non-empty string; got %r.", i, ip
+                )
 
     if "volume" not in cfg:
         _log.error("Config is missing required key 'volume'.")

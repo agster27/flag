@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def _base_config():
     """Minimal config.json content sufficient for schedule_sonos.main()."""
     return {
-        "sonos_ip": "192.168.1.100",
+        "speakers": ["192.168.1.100"],
         "volume": 30,
         "city": "TestCity",
         "country": "TC",
