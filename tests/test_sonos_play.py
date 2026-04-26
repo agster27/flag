@@ -639,5 +639,131 @@ class TestGroupedTargetWithNonTarget(unittest.TestCase):
         mock_snap.restore.assert_called_once()
 
 
+
+# ---------------------------------------------------------------------------
+# Regression test: non-target group member rejoined in Phase 6 (Bug 1)
+# ---------------------------------------------------------------------------
+
+class TestNonTargetMemberRejoin(unittest.TestCase):
+    """Non-target D (grouped with target A) must be rejoined to A in Phase 6."""
+
+    def setUp(self):
+        self.sp_a = _make_speaker("Speaker A", "uid-a")
+        self.sp_d = _make_speaker("Speaker D", "uid-d")
+        self.sp_a.get_current_transport_info.return_value = {"current_transport_state": "PLAYING"}
+        group = _make_group([self.sp_a, self.sp_d], self.sp_a)
+        self.sp_a.group = group
+
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    @patch("sonos_play.load_config", return_value=_base_config())
+    def test_non_target_member_rejoins_original_coordinator(
+        self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log
+    ):
+        """D (non-target) must be rejoined to A (coordinator) in Phase 6."""
+        mock_soco.return_value = self.sp_a
+        mock_snap = MagicMock()
+        mock_snap_cls.return_value = mock_snap
+
+        with patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+
+        # Phase 6: D must be rejoined to A even though D was not a target speaker
+        self.sp_d.join.assert_called_with(self.sp_a)
+        # Phase 6: restore ran (proves Phase 6 completed; was_playing=True)
+        mock_snap.restore.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Bug 3 regression: Phase 6 sleep is called once regardless of group count
+# ---------------------------------------------------------------------------
+
+class TestPhase6SleepCoalescing(unittest.TestCase):
+    """Phase 6 time.sleep(1) is called exactly once, not once per pre-existing group."""
+
+    def setUp(self):
+        # Two speakers, each in its own standalone group (two pre-existing groups)
+        self.sp1 = _make_speaker("Speaker 1", "uid-sp1")
+        self.sp1.group = _make_group([self.sp1], self.sp1)
+        self.sp1.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
+
+        self.sp2 = _make_speaker("Speaker 2", "uid-sp2")
+        self.sp2.group = _make_group([self.sp2], self.sp2)
+        self.sp2.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
+
+    def _make_soco(self, ip):
+        return self.sp1 if ip == "192.168.1.100" else self.sp2
+
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    def test_single_phase6_sleep_for_two_groups(
+        self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log
+    ):
+        """With 2 pre-existing groups, sleep(1) occurs at most 3 times (Phase 2, 3, 6)."""
+        cfg = _base_config()
+        cfg["speakers"] = ["192.168.1.100", "192.168.1.101"]
+        mock_soco.side_effect = self._make_soco
+        mock_snap_cls.return_value = MagicMock()
+
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+
+        sleep_args = [c.args[0] for c in mock_sleep.call_args_list]
+        # Before fix: 1 sleep per group in Phase 6 -> 4 total sleep(1) with 2 groups.
+        # After fix:  single sleep(1) in Phase 6 -> total sleep(1) count <= 3
+        # (Phase 2 unjoin, Phase 3 join, Phase 6 rejoin).
+        self.assertLessEqual(sleep_args.count(1), 3)
+
+
+# ---------------------------------------------------------------------------
+# Bug 4: SoCoSlaveException fallback path
+# ---------------------------------------------------------------------------
+
+class TestStopFallbackSlaveException(unittest.TestCase):
+    """If stop() raises SoCoSlaveException, fall back to group.coordinator.stop()."""
+
+    def setUp(self):
+        self.real_coord = _make_speaker("Real Coordinator", "uid-rc")
+        self.real_coord.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
+
+        self.speaker = _make_speaker("Speaker", "uid-sp")
+        self.speaker.group = _make_group([self.speaker, self.real_coord], self.real_coord)
+
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    @patch("sonos_play.load_config", return_value=_base_config())
+    def test_fallback_stop_on_slave_exception(
+        self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log
+    ):
+        """When stop() raises SoCoSlaveException, group.coordinator.stop() is called."""
+        try:
+            from soco.exceptions import SoCoSlaveException
+        except ImportError:
+            self.skipTest("SoCoSlaveException not available in installed soco version")
+
+        self.speaker.stop.side_effect = SoCoSlaveException("not coordinator")
+        mock_soco.return_value = self.speaker
+        mock_snap_cls.return_value = MagicMock()
+
+        with patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()  # must not raise
+
+        self.speaker.stop.assert_called_once()
+        self.real_coord.stop.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
