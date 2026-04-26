@@ -44,7 +44,7 @@ chmod +x setup.sh
 ║     Version 2.1.0                        ║
 ║     Status: ✅ Installed                  ║
 ╚══════════════════════════════════════════╝
-  Config: Sonos IP: 192.168.1.50 | 2 schedule(s) | Volume: 30
+  Config: Speakers: 192.168.1.50, 192.168.1.51 | 2 schedule(s)
 
   ── Read-only ──────────────────────────
   1) List scheduled plays
@@ -136,7 +136,7 @@ Edit `/opt/flag/config.json` to match your Sonos and preferences:
 
 ```json
 {
-  "sonos_ip": "192.168.1.50",
+  "speakers": ["192.168.1.50", "192.168.1.51"],
   "port": 8000,
   "volume": 30,
   "default_wait_seconds": 60,
@@ -160,15 +160,28 @@ Edit `/opt/flag/config.json` to match your Sonos and preferences:
 }
 ```
 
+### Multi-speaker synchronized playback
+
+When `speakers` contains more than one IP address, all speakers play the bugle call in perfect sync using a temporary Sonos group:
+
+1. Each speaker's current state (group membership, transport state, volume) is snapshotted.
+2. All speakers are temporarily unjoined from their existing groups.
+3. They join a temporary "bugle group" under the first speaker in the list (the coordinator).
+4. The audio plays on the coordinator — Sonos keeps all members in sync automatically.
+5. After playback, the temporary group is dissolved.
+6. Each speaker rejoins its original group and the prior playback state is restored.
+
+This means if Speaker A was playing Spotify before Colors, it will resume playing Spotify afterward. Speakers that were idle remain idle after the bugle call (when `skip_restore_if_idle=true`).
+
 ### Top-level keys
 
 | Key | Description |
 |-----|-------------|
-| `sonos_ip` | IP address of your Sonos speaker |
+| `speakers` | **Required.** List of one or more Sonos speaker IP addresses. All speakers play in synchronized playback. |
 | `port` | Port the HTTP audio server listens on (default: `8000`) |
-| `volume` | Playback volume (0–100) |
+| `volume` | Playback volume for the bugle call (0–100). Each speaker's original volume is restored afterward. |
 | `default_wait_seconds` | Fallback wait time (seconds) if MP3 duration cannot be determined |
-| `skip_restore_if_idle` | If `true`, do not restore prior playback when speaker was idle |
+| `skip_restore_if_idle` | If `true`, do not restore prior playback when a speaker was idle before the bugle call |
 | `latitude` / `longitude` | Your coordinates, used to calculate local sunset time |
 | `timezone` | IANA timezone name (e.g. `"America/New_York"`) |
 | `sunset_offset_minutes` | Optional offset in minutes from sunset (negative = before, positive = after). Defaults to `0` |

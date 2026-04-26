@@ -1,5 +1,5 @@
 {
-  "sonos_ip": "10.0.40.86",
+  "speakers": ["10.0.40.86"],
   "port": 8000,
   "volume": 10,
   "default_wait_seconds": 60,

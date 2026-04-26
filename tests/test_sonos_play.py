@@ -1,5 +1,5 @@
 """
-tests/test_sonos_play.py — Unit tests for sonos_play.py group-aware playback logic.
+tests/test_sonos_play.py -- Unit tests for sonos_play.py multi-speaker playback logic.
 
 Run with:
     python -m pytest tests/
@@ -23,16 +23,18 @@ def _make_group(members, coordinator):
     return group
 
 
-def _make_speaker(name, is_coordinator=False):
+def _make_speaker(name, uid=None):
     """Return a mock SoCo speaker."""
     speaker = MagicMock()
     speaker.player_name = name
+    speaker.uid = uid or name
+    speaker.volume = 30
     return speaker
 
 
 def _base_config():
     return {
-        "sonos_ip": "192.168.1.100",
+        "speakers": ["192.168.1.100"],
         "volume": 30,
         "skip_restore_if_idle": True,
         "default_wait_seconds": 60,
@@ -48,12 +50,48 @@ COMMON_PATCHES = [
 ]
 
 
-class TestStandaloneSpeaker(unittest.TestCase):
-    """Scenario 1: Speaker is standalone (not in any group)."""
+# ---------------------------------------------------------------------------
+# Config validation tests
+# ---------------------------------------------------------------------------
+
+class TestConfigValidation(unittest.TestCase):
+    """Validate speakers list requirements at startup."""
+
+    def _run_with_config(self, cfg):
+        """Run main() with the given config dict and expect SystemExit."""
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sonos_play.log"), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            with self.assertRaises(SystemExit):
+                sonos_play.main()
+
+    def test_missing_speakers_key(self):
+        """Missing speakers key -> sys.exit."""
+        self._run_with_config({"volume": 30})
+
+    def test_empty_speakers_list(self):
+        """Empty speakers list -> sys.exit."""
+        self._run_with_config({"speakers": [], "volume": 30})
+
+    def test_non_list_speakers(self):
+        """speakers is a string, not a list -> sys.exit."""
+        self._run_with_config({"speakers": "192.168.1.100", "volume": 30})
+
+    def test_none_speakers(self):
+        """speakers is None -> sys.exit."""
+        self._run_with_config({"speakers": None, "volume": 30})
+
+
+# ---------------------------------------------------------------------------
+# Single standalone speaker -- idle
+# ---------------------------------------------------------------------------
+
+class TestSingleStandaloneIdle(unittest.TestCase):
+    """Single speaker, standalone, idle -- skip_restore_if_idle=True."""
 
     def setUp(self):
-        self.speaker = _make_speaker("Living Room")
-        self.coordinator = self.speaker  # standalone — speaker IS coordinator
+        self.speaker = _make_speaker("Living Room", "uid-lr")
         self.speaker.group = _make_group([self.speaker], self.speaker)
         self.speaker.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
 
@@ -63,8 +101,8 @@ class TestStandaloneSpeaker(unittest.TestCase):
     @patch("sonos_play.Snapshot")
     @patch("sonos_play.soco.SoCo")
     @patch("sonos_play.load_config", return_value=_base_config())
-    def test_standalone_idle_skip_restore(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
-        """Idle standalone speaker with skip_restore_if_idle=True: no restore called."""
+    def test_play_and_skip_restore(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """Idle standalone: play_uri called; restore NOT called (skip_restore_if_idle=True)."""
         mock_soco.return_value = self.speaker
         mock_snap = MagicMock()
         mock_snap_cls.return_value = mock_snap
@@ -73,13 +111,13 @@ class TestStandaloneSpeaker(unittest.TestCase):
             import sonos_play
             sonos_play.main()
 
-        # group path NOT taken (only 1 member)
+        # play_uri on bugle coordinator (first/only speaker)
+        self.speaker.play_uri.assert_called_once_with(AUDIO_URL)
+        # Single standalone speaker -- no unjoin in Phase 2 (group has only 1 member)
         self.speaker.unjoin.assert_not_called()
+        # No one to join (only 1 speaker)
         self.speaker.join.assert_not_called()
-        # standalone path: stop → volume → play_uri on coordinator
-        self.coordinator.stop.assert_called_once()
-        self.coordinator.play_uri.assert_called_once_with(AUDIO_URL)
-        # idle + skip_restore_if_idle=True → no restore
+        # idle + skip_restore_if_idle=True -> no restore
         mock_snap.restore.assert_not_called()
 
     @patch("sonos_play.log")
@@ -88,9 +126,58 @@ class TestStandaloneSpeaker(unittest.TestCase):
     @patch("sonos_play.Snapshot")
     @patch("sonos_play.soco.SoCo")
     @patch("sonos_play.load_config", return_value=_base_config())
-    def test_standalone_was_playing_restores(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
-        """Standalone speaker that was playing: snapshot is restored after bugle."""
+    def test_volume_set_to_configured(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """Bugle volume is applied to the coordinator."""
+        mock_soco.return_value = self.speaker
+        mock_snap_cls.return_value = MagicMock()
+
+        with patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+
+        self.assertEqual(self.speaker.volume, 30)
+
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    def test_skip_restore_false_calls_restore(self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """skip_restore_if_idle=False -> restore IS called even when idle."""
+        cfg = _base_config()
+        cfg["skip_restore_if_idle"] = False
+        mock_soco.return_value = self.speaker
+        mock_snap = MagicMock()
+        mock_snap_cls.return_value = mock_snap
+
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+
+        mock_snap.restore.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Single standalone speaker -- was playing
+# ---------------------------------------------------------------------------
+
+class TestSingleStandalonePlaying(unittest.TestCase):
+    """Single speaker, standalone, was playing."""
+
+    def setUp(self):
+        self.speaker = _make_speaker("Living Room", "uid-lr")
+        self.speaker.group = _make_group([self.speaker], self.speaker)
         self.speaker.get_current_transport_info.return_value = {"current_transport_state": "PLAYING"}
+
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    @patch("sonos_play.load_config", return_value=_base_config())
+    def test_restore_called_when_was_playing(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """Speaker was playing -> snapshot.restore() IS called."""
         mock_soco.return_value = self.speaker
         mock_snap = MagicMock()
         mock_snap_cls.return_value = mock_snap
@@ -99,268 +186,433 @@ class TestStandaloneSpeaker(unittest.TestCase):
             import sonos_play
             sonos_play.main()
 
-        self.coordinator.play_uri.assert_called_once_with(AUDIO_URL)
+        self.speaker.play_uri.assert_called_once_with(AUDIO_URL)
         mock_snap.restore.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Pre-existing group dedup: multiple targets in one group -> one snapshot
+# ---------------------------------------------------------------------------
+
+class TestGroupDedup(unittest.TestCase):
+    """3 targets in the same pre-existing group -> only 1 snapshot taken."""
+
+    def setUp(self):
+        self.coord = _make_speaker("Coordinator", "uid-coord")
+        self.sp_a = _make_speaker("Speaker A", "uid-a")
+        self.sp_b = _make_speaker("Speaker B", "uid-b")
+        self.coord.get_current_transport_info.return_value = {"current_transport_state": "PLAYING"}
+        group = _make_group([self.coord, self.sp_a, self.sp_b], self.coord)
+        self.coord.group = group
+        self.sp_a.group = group
+        self.sp_b.group = group
+
+    def _make_soco(self, ip):
+        mapping = {
+            "192.168.1.100": self.coord,
+            "192.168.1.101": self.sp_a,
+            "192.168.1.102": self.sp_b,
+        }
+        if ip not in mapping:
+            raise Exception("Unknown IP: %s" % ip)
+        return mapping[ip]
 
     @patch("sonos_play.log")
     @patch("sonos_play.time.sleep")
     @patch("sonos_play.get_mp3_duration", return_value=5)
     @patch("sonos_play.Snapshot")
     @patch("sonos_play.soco.SoCo")
-    def test_standalone_skip_restore_false_restores(self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
-        """Standalone idle speaker with skip_restore_if_idle=False: restore is called."""
-        config = _base_config()
-        config["skip_restore_if_idle"] = False
-        mock_soco.return_value = self.speaker
+    def test_single_snapshot_for_shared_group(self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """3 speakers in 1 group -> Snapshot() instantiated exactly once."""
+        cfg = _base_config()
+        cfg["speakers"] = ["192.168.1.100", "192.168.1.101", "192.168.1.102"]
+        mock_soco.side_effect = self._make_soco
         mock_snap = MagicMock()
         mock_snap_cls.return_value = mock_snap
 
-        with patch("sonos_play.load_config", return_value=config):
-            with patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
-                import sonos_play
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+
+        # Snapshot class should be instantiated exactly once
+        self.assertEqual(mock_snap_cls.call_count, 1)
+        mock_snap.snapshot.assert_called_once()
+
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    def test_restore_called_once_for_shared_group(self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """3 speakers in 1 playing group -> restore() called exactly once."""
+        cfg = _base_config()
+        cfg["speakers"] = ["192.168.1.100", "192.168.1.101", "192.168.1.102"]
+        mock_soco.side_effect = self._make_soco
+        mock_snap = MagicMock()
+        mock_snap_cls.return_value = mock_snap
+
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+
+        mock_snap.restore.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Offline speaker tests
+# ---------------------------------------------------------------------------
+
+class TestOfflineSpeakers(unittest.TestCase):
+    """Tests for unreachable speaker handling."""
+
+    def setUp(self):
+        self.online = _make_speaker("Online Speaker", "uid-online")
+        self.online.group = _make_group([self.online], self.online)
+        self.online.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
+
+    def _make_soco_one_offline(self, ip):
+        if ip == "192.168.1.100":
+            return self.online
+        raise Exception("Speaker unreachable")
+
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    def test_offline_speaker_skipped_others_proceed(self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """One offline speaker is skipped; remaining speakers proceed normally."""
+        cfg = _base_config()
+        cfg["speakers"] = ["192.168.1.100", "192.168.1.200"]
+        mock_soco.side_effect = self._make_soco_one_offline
+        mock_snap_cls.return_value = MagicMock()
+
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+
+        # Online speaker should still play
+        self.online.play_uri.assert_called_once_with(AUDIO_URL)
+
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    def test_all_offline_exits_nonzero(self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """All speakers offline -> sys.exit(1) so systemd marks the unit failed."""
+        cfg = _base_config()
+        cfg["speakers"] = ["192.168.1.200", "192.168.1.201"]
+        mock_soco.side_effect = Exception("Unreachable")
+        mock_snap_cls.return_value = MagicMock()
+
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            with self.assertRaises(SystemExit) as ctx:
                 sonos_play.main()
 
-        mock_snap.restore.assert_called_once()
+        self.assertEqual(ctx.exception.code, 1)
 
 
-class TestGroupedSpeakerMusicPlaying(unittest.TestCase):
-    """Scenario 2: Speaker is in a group and music IS playing."""
+# ---------------------------------------------------------------------------
+# Restore logic -- was_playing flag
+# ---------------------------------------------------------------------------
 
-    def setUp(self):
-        self.target = _make_speaker("Kitchen")
-        self.other = _make_speaker("Living Room")
-        self.coordinator = _make_speaker("Coordinator")
-        self.coordinator.get_current_transport_info.return_value = {"current_transport_state": "PLAYING"}
-        self.target.group = _make_group([self.target, self.other, self.coordinator], self.coordinator)
+class TestRestoreLogic(unittest.TestCase):
+    """Verify restore is called / skipped correctly based on was_playing and skip flag."""
 
-    @patch("sonos_play.log")
-    @patch("sonos_play.time.sleep")
-    @patch("sonos_play.get_mp3_duration", return_value=5)
-    @patch("sonos_play.Snapshot")
-    @patch("sonos_play.soco.SoCo")
-    @patch("sonos_play.load_config", return_value=_base_config())
-    def test_grouped_music_playing_full_flow(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
-        """Grouped speaker, music playing: pause → unjoin → play on target → join → restore."""
-        mock_soco.return_value = self.target
-        mock_snap = MagicMock()
-        mock_snap_cls.return_value = mock_snap
+    def _run(self, was_playing, skip_restore_if_idle):
+        speaker = _make_speaker("Speaker", "uid-sp")
+        speaker.group = _make_group([speaker], speaker)
+        transport_state = "PLAYING" if was_playing else "STOPPED"
+        speaker.get_current_transport_info.return_value = {
+            "current_transport_state": transport_state
+        }
 
-        with patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+        cfg = _base_config()
+        cfg["skip_restore_if_idle"] = skip_restore_if_idle
+        snap = MagicMock()
+
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sonos_play.soco.SoCo", return_value=speaker), \
+             patch("sonos_play.Snapshot", return_value=snap), \
+             patch("sonos_play.get_mp3_duration", return_value=5), \
+             patch("sonos_play.time.sleep"), \
+             patch("sonos_play.log"), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
             import sonos_play
             sonos_play.main()
 
-        # Coordinator should be paused (music was playing)
-        self.coordinator.pause.assert_called_once()
-        # Target speaker should unjoin
-        self.target.unjoin.assert_called_once()
-        # Bugle plays on TARGET, not coordinator
-        self.target.play_uri.assert_called_once_with(AUDIO_URL)
-        self.coordinator.play_uri.assert_not_called()
-        # Target speaker stops after playback
-        self.target.stop.assert_called_once()
-        # Target rejoins coordinator
-        self.target.join.assert_called_once_with(self.coordinator)
-        # Snapshot restored (music was playing)
-        mock_snap.restore.assert_called_once()
+        return snap
+
+    def test_was_playing_true_restore_called(self):
+        """was_playing=True -> restore() called regardless of skip flag."""
+        snap = self._run(was_playing=True, skip_restore_if_idle=True)
+        snap.restore.assert_called_once()
+
+    def test_was_playing_false_skip_true_no_restore(self):
+        """was_playing=False + skip_restore_if_idle=True -> restore() NOT called."""
+        snap = self._run(was_playing=False, skip_restore_if_idle=True)
+        snap.restore.assert_not_called()
+
+    def test_was_playing_false_skip_false_restore_called(self):
+        """was_playing=False + skip_restore_if_idle=False -> restore() IS called."""
+        snap = self._run(was_playing=False, skip_restore_if_idle=False)
+        snap.restore.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Volume restoration
+# ---------------------------------------------------------------------------
+
+class TestVolumeRestoration(unittest.TestCase):
+    """Per-speaker volumes are restored after playback."""
+
+    def setUp(self):
+        self.sp1 = _make_speaker("Speaker 1", "uid-sp1")
+        self.sp1.volume = 25
+        self.sp1.group = _make_group([self.sp1], self.sp1)
+        self.sp1.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
+
+        self.sp2 = _make_speaker("Speaker 2", "uid-sp2")
+        self.sp2.volume = 40
+        self.sp2.group = _make_group([self.sp2], self.sp2)
+        self.sp2.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
+
+    def _make_soco(self, ip):
+        return self.sp1 if ip == "192.168.1.100" else self.sp2
 
     @patch("sonos_play.log")
     @patch("sonos_play.time.sleep")
     @patch("sonos_play.get_mp3_duration", return_value=5)
     @patch("sonos_play.Snapshot")
     @patch("sonos_play.soco.SoCo")
-    @patch("sonos_play.load_config", return_value=_base_config())
-    def test_grouped_volume_set_on_target(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
-        """Volume should be set on the target speaker (not the coordinator) when grouped."""
-        mock_soco.return_value = self.target
+    def test_volumes_restored_after_playback(self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """After bugle plays at bugle volume, each speaker original volume is restored."""
+        cfg = _base_config()
+        cfg["speakers"] = ["192.168.1.100", "192.168.1.101"]
+        cfg["volume"] = 10  # bugle volume differs from original volumes
+
+        mock_soco.side_effect = self._make_soco
         mock_snap_cls.return_value = MagicMock()
 
-        with patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
             import sonos_play
             sonos_play.main()
 
-        # Volume set on target speaker
-        self.assertEqual(self.target.volume, 30)
-        # Coordinator stop() should NOT be called in grouped path
-        self.coordinator.stop.assert_not_called()
+        # After Phase 7, each speaker should be back to its original volume
+        self.assertEqual(self.sp1.volume, 25)
+        self.assertEqual(self.sp2.volume, 40)
 
 
-class TestGroupedSpeakerMusicNotPlaying(unittest.TestCase):
-    """Scenario 3: Speaker is in a group and music is NOT playing."""
+# ---------------------------------------------------------------------------
+# try/finally discipline -- rejoin/restore even when play_uri raises
+# ---------------------------------------------------------------------------
 
-    def setUp(self):
-        self.target = _make_speaker("Kitchen")
-        self.other = _make_speaker("Living Room")
-        self.coordinator = _make_speaker("Coordinator")
-        self.coordinator.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
-        self.target.group = _make_group([self.target, self.other], self.coordinator)
-
-    @patch("sonos_play.log")
-    @patch("sonos_play.time.sleep")
-    @patch("sonos_play.get_mp3_duration", return_value=5)
-    @patch("sonos_play.Snapshot")
-    @patch("sonos_play.soco.SoCo")
-    @patch("sonos_play.load_config", return_value=_base_config())
-    def test_grouped_idle_skip_restore(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
-        """Grouped idle speaker, skip_restore_if_idle=True: no restore, but unjoin/join happen."""
-        mock_soco.return_value = self.target
-        mock_snap = MagicMock()
-        mock_snap_cls.return_value = mock_snap
-
-        with patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
-            import sonos_play
-            sonos_play.main()
-
-        # Music not playing → coordinator.pause() should NOT be called
-        self.coordinator.pause.assert_not_called()
-        # Still unjoin and join
-        self.target.unjoin.assert_called_once()
-        self.target.join.assert_called_once_with(self.coordinator)
-        # idle + skip_restore_if_idle=True → no restore
-        mock_snap.restore.assert_not_called()
-
-    @patch("sonos_play.log")
-    @patch("sonos_play.time.sleep")
-    @patch("sonos_play.get_mp3_duration", return_value=5)
-    @patch("sonos_play.Snapshot")
-    @patch("sonos_play.soco.SoCo")
-    def test_grouped_idle_skip_restore_false(self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
-        """Grouped idle speaker, skip_restore_if_idle=False: restore IS called."""
-        config = _base_config()
-        config["skip_restore_if_idle"] = False
-        mock_soco.return_value = self.target
-        mock_snap = MagicMock()
-        mock_snap_cls.return_value = mock_snap
-
-        with patch("sonos_play.load_config", return_value=config):
-            with patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
-                import sonos_play
-                sonos_play.main()
-
-        mock_snap.restore.assert_called_once()
-
-
-class TestGroupedSpeakerIsCoordinator(unittest.TestCase):
-    """Scenario 4: Target speaker IS the coordinator of a group."""
+class TestFinallyDiscipline(unittest.TestCase):
+    """Phases 5-7 execute even when Phase 4 (play_uri) raises."""
 
     def setUp(self):
-        self.coordinator = _make_speaker("Main Speaker")
-        self.other = _make_speaker("Bedroom")
-        self.coordinator.get_current_transport_info.return_value = {"current_transport_state": "PLAYING"}
-        # coordinator is also the speaker being targeted
-        self.coordinator.group = _make_group([self.coordinator, self.other], self.coordinator)
+        self.sp1 = _make_speaker("Speaker 1", "uid-sp1")
+        self.sp1.group = _make_group([self.sp1], self.sp1)
+        self.sp1.get_current_transport_info.return_value = {"current_transport_state": "PLAYING"}
+        self.sp1.play_uri.side_effect = RuntimeError("Network error during play_uri")
+
+        self.sp2 = _make_speaker("Speaker 2", "uid-sp2")
+        self.sp2.group = _make_group([self.sp2], self.sp2)
+        self.sp2.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
+
+    def _make_soco(self, ip):
+        return self.sp1 if ip == "192.168.1.100" else self.sp2
 
     @patch("sonos_play.log")
     @patch("sonos_play.time.sleep")
     @patch("sonos_play.get_mp3_duration", return_value=5)
     @patch("sonos_play.Snapshot")
     @patch("sonos_play.soco.SoCo")
-    @patch("sonos_play.load_config", return_value=_base_config())
-    def test_coordinator_as_target(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
-        """Target == coordinator: same group flow — unjoin, play solo, rejoin, restore."""
-        mock_soco.return_value = self.coordinator
-        mock_snap = MagicMock()
-        mock_snap_cls.return_value = mock_snap
-
-        with patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
-            import sonos_play
-            sonos_play.main()
-
-        self.coordinator.pause.assert_called_once()
-        self.coordinator.unjoin.assert_called_once()
-        self.coordinator.play_uri.assert_called_once_with(AUDIO_URL)
-        self.coordinator.join.assert_called_once_with(self.coordinator)
-        mock_snap.restore.assert_called_once()
-
-
-class TestErrorHandlingDuringPlayback(unittest.TestCase):
-    """Scenario 5: Error during playback still rejoins the group."""
-
-    def setUp(self):
-        self.target = _make_speaker("Kitchen")
-        self.other = _make_speaker("Living Room")
-        self.coordinator = _make_speaker("Coordinator")
-        self.coordinator.get_current_transport_info.return_value = {"current_transport_state": "PLAYING"}
-        self.target.group = _make_group([self.target, self.other], self.coordinator)
-        # play_uri raises an error
-        self.target.play_uri.side_effect = RuntimeError("Network error")
-
-    @patch("sonos_play.log")
-    @patch("sonos_play.time.sleep")
-    @patch("sonos_play.get_mp3_duration", return_value=5)
-    @patch("sonos_play.Snapshot")
-    @patch("sonos_play.soco.SoCo")
-    @patch("sonos_play.load_config", return_value=_base_config())
-    def test_rejoin_called_even_on_playback_error(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
-        """If play_uri raises, the finally block still calls join() to rejoin the group."""
-        mock_soco.return_value = self.target
+    def test_stop_called_after_play_uri_raises(self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """Phase 5 (stop) runs in finally even when play_uri raises."""
+        cfg = _base_config()
+        cfg["speakers"] = ["192.168.1.100", "192.168.1.101"]
+        mock_soco.side_effect = self._make_soco
         mock_snap_cls.return_value = MagicMock()
 
-        with patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
             import sonos_play
-            sonos_play.main()  # should not raise — outer except catches it
+            sonos_play.main()  # must not raise -- outer except catches it
 
-        self.target.unjoin.assert_called_once()
-        # join() must be called in finally even though play_uri raised
-        self.target.join.assert_called_once_with(self.coordinator)
+        # stop() must still be called on bugle coordinator (Phase 5)
+        self.sp1.stop.assert_called_once()
 
     @patch("sonos_play.log")
     @patch("sonos_play.time.sleep")
     @patch("sonos_play.get_mp3_duration", return_value=5)
     @patch("sonos_play.Snapshot")
     @patch("sonos_play.soco.SoCo")
-    @patch("sonos_play.load_config", return_value=_base_config())
-    def test_join_failure_is_logged_not_raised(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
-        """If join() also fails, the error is swallowed and logged (does not crash the process)."""
-        self.target.play_uri.side_effect = None  # playback succeeds this time
-        self.target.join.side_effect = RuntimeError("Join failed")
-        mock_soco.return_value = self.target
+    def test_bugle_member_unjoined_after_play_uri_raises(self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """Phase 5 unjoin of non-coordinator bugle members runs even when play_uri raises."""
+        cfg = _base_config()
+        cfg["speakers"] = ["192.168.1.100", "192.168.1.101"]
+        mock_soco.side_effect = self._make_soco
         mock_snap_cls.return_value = MagicMock()
 
-        with patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
             import sonos_play
-            # Should not raise even though join() raises
             sonos_play.main()
 
-        self.target.join.assert_called_once()
+        # sp2 is the non-coordinator bugle member; must be unjoined in Phase 5
+        self.sp2.unjoin.assert_called()
 
     @patch("sonos_play.log")
     @patch("sonos_play.time.sleep")
     @patch("sonos_play.get_mp3_duration", return_value=5)
     @patch("sonos_play.Snapshot")
     @patch("sonos_play.soco.SoCo")
-    @patch("sonos_play.load_config", return_value=_base_config())
-    def test_stop_fallback_to_group_coordinator(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
-        """If stop() raises a coordinator-only error, fall back to group.coordinator.stop()."""
-        # Reset play_uri to succeed (override setUp's side_effect)
-        self.target.play_uri.side_effect = None
-        # stop() raises the Sonos coordinator-only error
-        self.target.stop.side_effect = Exception(
-            'The method or property "stop" can only be called/used on the coordinator in a group'
+    def test_restore_called_after_play_uri_raises(self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """Phase 6 restore runs in finally when play_uri raises (sp1 was playing)."""
+        cfg = _base_config()
+        cfg["speakers"] = ["192.168.1.100", "192.168.1.101"]
+        mock_soco.side_effect = self._make_soco
+        mock_snap = MagicMock()
+        mock_snap_cls.return_value = mock_snap
+
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+
+        # sp1 was_playing=True -> restore should still be called via finally
+        mock_snap.restore.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# stop() fallback to group coordinator
+# ---------------------------------------------------------------------------
+
+class TestStopFallback(unittest.TestCase):
+    """If stop() raises a coordinator-only error, fall back to group.coordinator.stop()."""
+
+    def setUp(self):
+        # Simulate a race condition: the bugle coordinator got re-grouped under
+        # real_coord between Phase 4 and Phase 5.  The initial group is used for
+        # the Phase 1 snapshot; real_coord.stop() is the expected fallback call.
+        self.real_coord = _make_speaker("Real Coordinator", "uid-rc")
+        self.real_coord.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
+
+        self.speaker = _make_speaker("Speaker", "uid-sp")
+        # Phase 1 sees this speaker grouped under real_coord
+        self.speaker.group = _make_group([self.speaker, self.real_coord], self.real_coord)
+        # stop() on the bugle coordinator raises the Sonos coordinator-only error
+        self.speaker.stop.side_effect = Exception(
+            "The method or property stop can only be called/used on the coordinator in a group"
         )
-        mock_soco.return_value = self.target
+
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    @patch("sonos_play.load_config", return_value=_base_config())
+    def test_fallback_stop_on_coordinator_error(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """When stop() raises a coordinator-only error, group.coordinator.stop() is called."""
+        mock_soco.return_value = self.speaker
         mock_snap_cls.return_value = MagicMock()
 
         with patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
             import sonos_play
             sonos_play.main()  # must not raise
 
-        # Primary stop was attempted on the target speaker
-        self.target.stop.assert_called_once()
-        # Fallback: coordinator.stop() was called
-        self.coordinator.stop.assert_called_once()
-        # Cleanup still proceeds: join is called
-        self.target.join.assert_called_once_with(self.coordinator)
+        # Primary stop was attempted on the bugle coordinator
+        self.speaker.stop.assert_called_once()
+        # Fallback: the current group coordinator's stop() was called
+        self.real_coord.stop.assert_called_once()
 
 
-class TestSleepDelaysAroundGroupChanges(unittest.TestCase):
-    """Verify that time.sleep(1) is called after unjoin and after join."""
+# ---------------------------------------------------------------------------
+# Multiple speakers -- bugle group formation
+# ---------------------------------------------------------------------------
+
+class TestMultiSpeakerBugledGroup(unittest.TestCase):
+    """Phase 3: non-coordinator speakers join the bugle coordinator."""
 
     def setUp(self):
-        self.target = _make_speaker("Kitchen")
-        self.other = _make_speaker("Living Room")
-        self.coordinator = _make_speaker("Coordinator")
-        self.coordinator.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
-        self.target.group = _make_group([self.target, self.other], self.coordinator)
+        self.sp1 = _make_speaker("Speaker 1", "uid-sp1")
+        self.sp1.group = _make_group([self.sp1], self.sp1)
+        self.sp1.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
+
+        self.sp2 = _make_speaker("Speaker 2", "uid-sp2")
+        self.sp2.group = _make_group([self.sp2], self.sp2)
+        self.sp2.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
+
+    def _make_soco(self, ip):
+        return self.sp1 if ip == "192.168.1.100" else self.sp2
+
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    def test_non_coordinator_joins_bugle_coordinator(self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """Second speaker joins first (bugle coordinator) in Phase 3."""
+        cfg = _base_config()
+        cfg["speakers"] = ["192.168.1.100", "192.168.1.101"]
+        mock_soco.side_effect = self._make_soco
+        mock_snap_cls.return_value = MagicMock()
+
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+
+        # sp2 (non-coordinator) must join sp1 (bugle coordinator)
+        self.sp2.join.assert_any_call(self.sp1)
+        # play_uri called only on the bugle coordinator
+        self.sp1.play_uri.assert_called_once_with(AUDIO_URL)
+        self.sp2.play_uri.assert_not_called()
+
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    def test_sleep_called_after_unjoin_and_join(self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """time.sleep(1) is called after Phase 2 unjoin and after Phase 3 join."""
+        cfg = _base_config()
+        cfg["speakers"] = ["192.168.1.100", "192.168.1.101"]
+        mock_soco.side_effect = self._make_soco
+        mock_snap_cls.return_value = MagicMock()
+
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+
+        sleep_args = [c.args[0] for c in mock_sleep.call_args_list]
+        # sleep(1) after Phase 2 unjoin, sleep(1) after Phase 3 join
+        self.assertIn(1, sleep_args)
+        self.assertGreaterEqual(sleep_args.count(1), 2)
+
+
+# ---------------------------------------------------------------------------
+# Pre-existing grouped speaker with non-target member
+# ---------------------------------------------------------------------------
+
+class TestGroupedTargetWithNonTarget(unittest.TestCase):
+    """Target A is grouped with non-target D; A should unjoin for bugle then restore."""
+
+    def setUp(self):
+        self.sp_a = _make_speaker("Speaker A", "uid-a")
+        self.sp_d = _make_speaker("Speaker D", "uid-d")
+        self.sp_a.get_current_transport_info.return_value = {"current_transport_state": "PLAYING"}
+        group = _make_group([self.sp_a, self.sp_d], self.sp_a)
+        self.sp_a.group = group
 
     @patch("sonos_play.log")
     @patch("sonos_play.time.sleep")
@@ -368,21 +620,24 @@ class TestSleepDelaysAroundGroupChanges(unittest.TestCase):
     @patch("sonos_play.Snapshot")
     @patch("sonos_play.soco.SoCo")
     @patch("sonos_play.load_config", return_value=_base_config())
-    def test_sleep_called_after_unjoin_and_join(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
-        """time.sleep(1) is invoked at least twice in the grouped path (after unjoin and join)."""
-        mock_soco.return_value = self.target
-        mock_snap_cls.return_value = MagicMock()
+    def test_target_unjoins_plays_and_snapshot_restored(self, mock_cfg, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """A (coordinator, was playing) unjoins, plays bugle solo, then snapshot is restored."""
+        mock_soco.return_value = self.sp_a
+        mock_snap = MagicMock()
+        mock_snap_cls.return_value = mock_snap
 
         with patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
             import sonos_play
             sonos_play.main()
 
-        # sleep(1) after unjoin, sleep(duration=5) for playback, sleep(1) after join → exactly 3 calls
-        sleep_args = [c.args[0] for c in mock_sleep.call_args_list]
-        self.assertIn(1, sleep_args)
-        self.assertEqual(sleep_args.count(1), 2)
+        # Phase 2: A (coordinator and was playing) should be paused then unjoined
+        self.sp_a.pause.assert_called_once()
+        self.sp_a.unjoin.assert_called()
+        # Phase 4: bugle plays on A
+        self.sp_a.play_uri.assert_called_once_with(AUDIO_URL)
+        # Phase 6: restore called (was_playing=True)
+        mock_snap.restore.assert_called_once()
 
 
 if __name__ == "__main__":
     unittest.main()
-

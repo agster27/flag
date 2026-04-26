@@ -80,9 +80,10 @@ EOF
 # ---------------------------------------------------------------------------
 # Auto-discover Sonos speakers on the local network via soco/SSDP.
 # Sets SONOS_IP to the chosen/found IP, or empty string if none selected.
+# Used by the "Test Sonos Playback" menu option (single-speaker selection for quick testing).
 # Requires the Python venv (with soco installed) to already exist.
 # ---------------------------------------------------------------------------
-function discover_sonos_ip() {
+function _pick_single_speaker() {
     if [ ! -d "$VENV_DIR" ]; then
         SONOS_IP=""
         return
@@ -149,6 +150,90 @@ PYEOF
 }
 
 # ---------------------------------------------------------------------------
+# Discover Sonos speakers and let the user select ONE OR MORE for synchronized
+# multi-speaker playback.  Sets SPEAKERS_JSON to a JSON array of IP strings.
+# Requires the Python venv (with soco installed) to already exist.
+# ---------------------------------------------------------------------------
+function discover_sonos_speakers() {
+    SPEAKERS_JSON="[]"
+
+    if [ ! -d "$VENV_DIR" ]; then
+        return
+    fi
+
+    log "🔍 Scanning network for Sonos speakers..."
+    DISCOVERED=$("$VENV_DIR/bin/python" - <<'PYEOF'
+import sys
+try:
+    from soco.discovery import discover
+    devices = sorted(discover(timeout=5) or [], key=lambda d: d.player_name)
+    for d in devices:
+        print(f"{d.player_name}\t{d.ip_address}")
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+PYEOF
+)
+
+    if [ -z "$DISCOVERED" ]; then
+        echo ""
+        echo "  ⚠️  No Sonos speakers found on the network."
+        return
+    fi
+
+    echo ""
+    echo "  Found Sonos speakers:"
+    i=1
+    declare -a DISC_IPS
+    while IFS=$'\t' read -r name ip; do
+        echo "    $i) $name — $ip"
+        DISC_IPS[$i]="$ip"
+        ((i++))
+    done <<< "$DISCOVERED"
+    COUNT=$((i - 1))
+    echo ""
+
+    if [ "$COUNT" -eq 1 ]; then
+        echo "  ✅ Only one speaker found. Using: ${DISC_IPS[1]}"
+        SPEAKERS_JSON=$(jq -n --arg ip "${DISC_IPS[1]}" '[$ip]')
+        return
+    fi
+
+    echo "  Enter the numbers of the speakers to use (comma-separated, e.g. 1,3)."
+    echo "  Press Enter to select all, or type IPs manually instead."
+    while true; do
+        read -rp "  Selection [1-${COUNT}, comma-separated, or Enter for all]: " SEL
+        if [ -z "$SEL" ]; then
+            # Select all discovered speakers
+            SPEAKERS_JSON="[]"
+            for (( j=1; j<=COUNT; j++ )); do
+                SPEAKERS_JSON=$(echo "$SPEAKERS_JSON" | jq --arg ip "${DISC_IPS[$j]}" '. + [$ip]')
+            done
+            echo "  ✅ Selected all $COUNT speaker(s)."
+            return
+        fi
+        # Validate and parse comma-separated selection
+        local _valid=true
+        local _selected_json="[]"
+        IFS=',' read -ra _parts <<< "$SEL"
+        for _part in "${_parts[@]}"; do
+            _n="${_part// /}"  # strip spaces
+            if [[ "$_n" =~ ^[0-9]+$ ]] && [ "$_n" -ge 1 ] && [ "$_n" -le "$COUNT" ]; then
+                _selected_json=$(echo "$_selected_json" | jq --arg ip "${DISC_IPS[$_n]}" '. + [$ip]')
+            else
+                echo "  ⚠️  Invalid selection: '$_n'. Enter numbers between 1 and $COUNT."
+                _valid=false
+                break
+            fi
+        done
+        if [ "$_valid" = "true" ]; then
+            SPEAKERS_JSON="$_selected_json"
+            echo "  ✅ Selected $(echo "$SPEAKERS_JSON" | jq 'length') speaker(s)."
+            return
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
 # Interactive configuration wizard.
 # Writes $CONFIG_FILE with user-supplied (or defaulted) values.
 # ---------------------------------------------------------------------------
@@ -177,14 +262,38 @@ function configure_setup() {
         fi
     fi
 
-    # Sonos IP — try auto-discovery first
-    default_ip=$(cfg_default "sonos_ip" "")
-    discover_sonos_ip
-    # If discovery returned empty (no devices found or user chose manual), fall back
-    if [ -z "$SONOS_IP" ]; then
-        read -rp "  Sonos speaker IP address [${default_ip}]: " INPUT
-        SONOS_IP="${INPUT:-$default_ip}"
+    # Speakers list — try auto-discovery first, fall back to manual entry
+    # Read existing speakers from config (new format) for use as a default display
+    _existing_speakers_display=""
+    if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
+        _existing_speakers_display=$(jq -r '.speakers // [] | join(", ")' "$CONFIG_FILE" 2>/dev/null || echo "")
     fi
+
+    discover_sonos_speakers
+    if [ "$(echo "$SPEAKERS_JSON" | jq 'length')" -eq 0 ]; then
+        # Discovery found nothing (or venv not ready) — prompt for manual IPs
+        echo ""
+        if [ -n "$_existing_speakers_display" ]; then
+            read -rp "  Sonos speaker IP(s), comma-separated [${_existing_speakers_display}]: " INPUT
+        else
+            read -rp "  Sonos speaker IP(s), comma-separated (e.g. 10.0.0.10,10.0.0.11): " INPUT
+        fi
+        if [ -z "$INPUT" ] && [ -n "$_existing_speakers_display" ]; then
+            INPUT="$_existing_speakers_display"
+        fi
+        # Build JSON array from comma-separated input
+        SPEAKERS_JSON="[]"
+        IFS=',' read -ra _ips <<< "$INPUT"
+        for _ip in "${_ips[@]}"; do
+            _ip="${_ip// /}"  # strip spaces
+            if [ -n "$_ip" ]; then
+                SPEAKERS_JSON=$(echo "$SPEAKERS_JSON" | jq --arg ip "$_ip" '. + [$ip]')
+            fi
+        done
+    fi
+
+    # Derive a single IP from SPEAKERS_JSON for local-IP detection below
+    SONOS_IP=$(echo "$SPEAKERS_JSON" | jq -r '.[0] // ""')
 
     # HTTP server port
     default_port=$(cfg_default "port" "8000")
@@ -428,7 +537,7 @@ function configure_setup() {
     echo ""
     echo "  Writing config to $CONFIG_FILE ..."
     jq -n \
-        --arg      sonos_ip        "$SONOS_IP" \
+        --argjson  speakers        "$SPEAKERS_JSON" \
         --argjson  port            "$PORT" \
         --argjson  volume          "$VOLUME" \
         --argjson  wait            "$WAIT_SECS" \
@@ -439,7 +548,7 @@ function configure_setup() {
         --argjson  offset          "$SUNSET_OFFSET" \
         --argjson  schedules       "$SCHEDULES_JSON" \
         '{
-          "sonos_ip":              $sonos_ip,
+          "speakers":              $speakers,
           "port":                  $port,
           "volume":                $volume,
           "default_wait_seconds":  $wait,
@@ -592,8 +701,14 @@ function test_sonos_playback() {
         return
     fi
 
-    discover_sonos_ip
+    _pick_single_speaker
 
+    if [ -z "$SONOS_IP" ]; then
+        # Fall back to first speaker from config
+        if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
+            SONOS_IP=$(jq -r '.speakers[0] // ""' "$CONFIG_FILE" 2>/dev/null)
+        fi
+    fi
     if [ -z "$SONOS_IP" ]; then
         read -rp "  Enter Sonos speaker IP to test: " SONOS_IP
     fi
@@ -602,8 +717,8 @@ function test_sonos_playback() {
         return
     fi
 
-    # Use the first schedule's audio_url (new format) or fall back to legacy colors_url
-    TEST_URL=$(jq -r '(.schedules[0].audio_url // .colors_url // "")' "$CONFIG_FILE")
+    # Use the first schedule's audio_url
+    TEST_URL=$(jq -r '(.schedules[0].audio_url // "")' "$CONFIG_FILE")
     echo ""
     echo "  🔊 Playing test sound on $SONOS_IP ..."
     echo "     URL: $TEST_URL"
@@ -613,7 +728,7 @@ function test_sonos_playback() {
     echo ""
 
     TMPCONFIG=$(mktemp --suffix=.json) || { echo "  ❌ Failed to create temp file."; return 1; }
-    if ! jq --arg ip "$SONOS_IP" '.sonos_ip = $ip' "$CONFIG_FILE" > "$TMPCONFIG"; then
+    if ! jq --argjson speakers "[\"$SONOS_IP\"]" '.speakers = $speakers' "$CONFIG_FILE" > "$TMPCONFIG"; then
         rm -f "$TMPCONFIG"
         echo "  ❌ Failed to build test config. Check $CONFIG_FILE."
         return 1
@@ -758,9 +873,9 @@ function prompt_menu() {
     fi
 
     if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
-        _ip=$(jq -r '.sonos_ip // "not set"' "$CONFIG_FILE" 2>/dev/null)
+        _speakers=$(jq -r '.speakers // [] | join(", ")' "$CONFIG_FILE" 2>/dev/null || echo "not set")
         _cnt=$(jq '.schedules | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
-        echo "  Config:  Sonos IP: $_ip | $_cnt schedule(s)"
+        echo "  Config:  Speakers: $_speakers | $_cnt schedule(s)"
     fi
 
     get_sunset_header_line || true
