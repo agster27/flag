@@ -67,6 +67,11 @@ from mutagen.mp3 import MP3
 from soco.snapshot import Snapshot
 from config import load_config, LOG_FILE
 
+try:
+    from soco.exceptions import SoCoSlaveException  # may not exist in older soco
+except ImportError:
+    SoCoSlaveException = None
+
 
 def log(message):
     """
@@ -174,7 +179,7 @@ def main():
     for ip in speakers_cfg:
         try:
             sp = soco.SoCo(ip)
-            _ = sp.group  # probe connectivity; raises if the speaker is unreachable
+            sp.get_speaker_info(refresh=True)  # forces a network round-trip to the device; raises if the speaker is unreachable
             reachable.append(sp)
             log(f"INFO: Connected to speaker at {ip} ({sp.player_name})")
         except Exception as e:
@@ -193,7 +198,7 @@ def main():
     # =========================================================================
     # Phase 1: Snapshot (per pre-existing group, not per speaker)
     # =========================================================================
-    # pre_existing_groups: coordinator_uid -> {snapshot, was_playing, member_uids, coordinator_speaker}
+    # pre_existing_groups: coordinator_uid -> {snapshot, was_playing, member_uids, member_speakers, coordinator_speaker}
     pre_existing_groups = {}
     pre_bugle_volumes = {}  # speaker uid -> volume before we change it
 
@@ -208,10 +213,13 @@ def main():
                 snap = Snapshot(group_coord)
                 snap.snapshot()
                 member_uids = {m.uid for m in sp.group.members}
+                # Exclude the coordinator itself; only non-coordinator members need to rejoin.
+                member_speakers = [m for m in sp.group.members if m.uid != group_coord.uid]
                 pre_existing_groups[uid] = {
                     "snapshot": snap,
                     "was_playing": was_playing,
-                    "member_uids": member_uids,
+                    "member_uids": member_uids,             # keep for any existing references
+                    "member_speakers": member_speakers,     # full SoCo objects of non-coordinator members
                     "coordinator_speaker": group_coord,
                 }
                 log(f"INFO: Snapshot taken on {group_coord.player_name} (was_playing={was_playing})")
@@ -281,11 +289,14 @@ def main():
             bugle_coordinator.stop()
             log(f"INFO: Stopped playback on {bugle_coordinator.player_name}")
         except Exception as stop_err:
-            # Sonos raises a generic exception with this message when stop()
-            # is called on a non-coordinator group member.  soco does not
-            # expose a dedicated exception type for this case, so we
-            # identify it by the canonical message fragment "coordinator".
-            if "coordinator" in str(stop_err).lower():
+            # Sonos raises an error when stop() is called on a non-coordinator group
+            # member.  We detect this via SoCoSlaveException (if available in the
+            # installed soco version) or by matching the canonical message fragment
+            # "coordinator" as a fallback for older soco versions.
+            is_slave_error = (
+                SoCoSlaveException is not None and isinstance(stop_err, SoCoSlaveException)
+            ) or "coordinator" in str(stop_err).lower()
+            if is_slave_error:
                 try:
                     bugle_coordinator.group.coordinator.stop()
                     log(
@@ -310,13 +321,29 @@ def main():
         # =====================================================================
         # Phase 6: Restore pre-existing groups
         # =====================================================================
+        # Identity of speakers is compared by Sonos UID rather than Python object
+        # identity: the same physical speaker can be represented by different SoCo
+        # instances (one created in Phase 0 for `reachable`, another captured here
+        # from `sp.group.coordinator` in Phase 1).
+
+        # First pass: rejoin all pre-existing group members (including non-targets
+        # captured in Phase 1 as full SoCo objects via `member_speakers`).
+        for uid, info in pre_existing_groups.items():
+            group_coord = info["coordinator_speaker"]
+            for member in info["member_speakers"]:
+                try:
+                    member.join(group_coord)
+                except Exception as e:
+                    log(f"WARNING: Could not rejoin {member.player_name} to original group: {e}")
+
+        # Sleep once after all rejoins (not once per group) to allow Sonos devices
+        # to settle after the group topology changes before restoring transport state.
+        time.sleep(1)
+
+        # Second pass: restore transport state for each pre-existing group.
         for uid, info in pre_existing_groups.items():
             try:
                 group_coord = info["coordinator_speaker"]
-                for sp in reachable:
-                    if sp.uid in info["member_uids"] and sp.uid != group_coord.uid:
-                        sp.join(group_coord)
-                time.sleep(1)
                 if info["was_playing"] or not skip_restore_if_idle:
                     info["snapshot"].restore()
                     log(
