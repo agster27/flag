@@ -5,6 +5,10 @@ Accepts a single audio URL argument, temporarily groups the configured speakers,
 plays the requested file, waits for playback to finish, then dissolves the
 temporary group and restores each speaker to its prior state (group membership,
 transport state, and volume). All events are logged to LOG_FILE.
+
+When only one speaker is configured, the same 7-phase flow applies — the
+group formation steps (join/unjoin) are simply no-ops because there are no
+other speakers to coordinate with.
 """
 
 # =============================================================================

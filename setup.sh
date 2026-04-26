@@ -80,7 +80,7 @@ EOF
 # ---------------------------------------------------------------------------
 # Auto-discover Sonos speakers on the local network via soco/SSDP.
 # Sets SONOS_IP to the chosen/found IP, or empty string if none selected.
-# Used by test_sonos_playback (single-speaker selection for quick testing).
+# Used by the "Test Sonos Playback" menu option (single-speaker selection for quick testing).
 # Requires the Python venv (with soco installed) to already exist.
 # ---------------------------------------------------------------------------
 function _pick_single_speaker() {
