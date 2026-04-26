@@ -451,12 +451,21 @@ def _is_reschedule_run(schedule_names):
 
     When all ``flag-{name}.timer`` units are already enabled, this script is being
     invoked by the nightly ``flag-reschedule.timer`` to recalculate sunset times.
-    In this mode the stop→write→reload→start sequence is used for sunset timers
-    (they are stopped before rewriting the unit file, then explicitly started after
-    ``daemon-reload`` to arm them for today's sunset).  Because ``Persistent=false``
-    is written into the sunset timer unit, starting the timer at 02:00 does *not*
-    cause a catch-up fire — systemd simply waits until the ``OnCalendar`` time
-    (sunset) arrives.  Fixed-time timers are restarted normally.
+    In this mode the write→daemon-reload sequence is used for sunset timers: the new
+    unit file is written atomically and then ``daemon-reload`` is called.  The
+    already-active sunset timer is left alone — systemd re-reads the updated unit
+    file on ``daemon-reload`` and re-arms the *active* timer with the new
+    ``OnCalendar`` value automatically.  No ``stop``/``start`` is required.
+
+    NOTE: the previous approach (PR #43) used stop→write→reload→start for sunset
+    timers.  That caused the timer to fire immediately after ``systemctl start``,
+    even with ``Persistent=false``, because systemd's internal next-elapse
+    calculation can treat today's ``OnCalendar`` event as missed immediately after
+    a stop+reload cycle.  Leaving the timer active and relying on ``daemon-reload``
+    re-arming is the correct fix.
+
+    Fixed-time timers are restarted normally (their ``OnCalendar``, e.g. 08:00, has
+    not elapsed at the 02:00 reschedule time, so a restart is safe).
     ``flag-reschedule.timer`` is never restarted (to avoid the self-referential
     restart that triggers a catch-up fire at 02:00).
 
@@ -529,9 +538,9 @@ def main():
        backward-compatibility for the old flat-key format).
     3. Detect whether this is a reschedule run (all timers already enabled)
        or a first-install run.
-    4. For reschedule runs, stop any sunset-based timers *before* writing the
-       new unit files (stop→write→reload ensures systemd never sees a stale
-       ``OnCalendar`` value during the transition).
+    4. For reschedule runs, write new sunset timer unit files and run
+       ``daemon-reload`` — the already-active sunset timer is re-armed
+       automatically.  No ``stop``/``start`` is needed or safe to use.
     5. For each schedule, compute the fire time (fixed HH:MM or today's
        sunset in local time) and write a ``.service`` + ``.timer`` pair
        atomically.
@@ -542,15 +551,15 @@ def main():
     9. Activate timers:
 
        - **Reschedule run**: restart fixed-time timers normally.  Sunset timers
-         are explicitly started after the unit-file update so systemd arms them
-         for today's sunset.  Starting a sunset timer at 02:00 is safe because
-         ``Persistent=false`` is already written into the timer unit — systemd
-         will not fire a catch-up at 02:00; it simply waits until
-         ``OnCalendar`` (sunset) arrives.  ``flag-reschedule.timer`` is also
-         skipped — it is always hardcoded to 02:00 and restarting your own
-         parent timer with ``Persistent=true`` at the exact ``OnCalendar``
-         time can cause systemd to treat the just-elapsed event as "missed"
-         and fire again.
+         are left active — ``daemon-reload`` re-arms an already-active timer
+         with the new ``OnCalendar`` value automatically, so no ``stop``/``start``
+         is required.  (The previous PR #43 approach of stop→write→reload→start
+         caused the timer to fire immediately after ``systemctl start``, even with
+         ``Persistent=false``, due to systemd's next-elapse recalculation after a
+         stop+reload cycle.)  ``flag-reschedule.timer`` is also skipped — it is
+         always hardcoded to 02:00 and restarting your own parent timer with
+         ``Persistent=true`` at the exact ``OnCalendar`` time can cause systemd to
+         treat the just-elapsed event as "missed" and fire again.
        - **First-install run**: run ``systemctl enable --now`` for all timers
          including ``flag-reschedule.timer``.
 
@@ -621,9 +630,8 @@ def main():
     if is_reschedule:
         _log.info(
             "Run reason: reschedule — all %d schedule timer(s) already enabled; "
-            "will stop sunset timers before rewriting unit files, start them "
-            "after daemon-reload (Persistent=false prevents 02:00 catch-up), and skip "
-            "flag-reschedule.timer restart",
+            "will write updated unit files and daemon-reload (already-active sunset "
+            "timer re-armed by daemon-reload), skip flag-reschedule.timer restart",
             len(processed_names),
         )
     else:
@@ -632,33 +640,6 @@ def main():
             "enabled; will use 'enable --now' for all timers including "
             "flag-reschedule.timer"
         )
-
-    # --- For reschedule runs: stop sunset timers BEFORE writing new unit files ---
-    # This ensures systemd never sees a stale OnCalendar value during the
-    # file-swap.  Sequence: stop → write new file → daemon-reload → start.
-    # Sunset timers are restarted after daemon-reload to arm them for today's
-    # sunset.  Starting a stopped timer at 02:00 is safe because the timer unit
-    # has Persistent=false — systemd will not fire a catch-up at 02:00; it
-    # simply waits until the OnCalendar time (sunset) arrives.
-    stopped_sunset_names: set[str] = set()
-    if is_reschedule:
-        for entry in processed:
-            if entry["time"] == "sunset":
-                timer_name = f"flag-{entry['name']}.timer"
-                _log.info(
-                    "Stopping %s before writing updated unit file "
-                    "(stop→write→reload→start sequence)",
-                    timer_name,
-                )
-                try:
-                    _run_systemctl("stop", timer_name)
-                    _log.info("Stopped %s successfully", timer_name)
-                except RuntimeError as exc:
-                    _log.warning(
-                        "Could not stop %s (may already be stopped): %s",
-                        timer_name, exc,
-                    )
-                stopped_sunset_names.add(entry["name"])
 
     print("Writing systemd unit files...")
 
@@ -762,35 +743,35 @@ def main():
 
     # --- Activate timers ---
     if is_reschedule:
-        # Reschedule run: restart fixed-time timers normally, start sunset
-        # timers so they are armed for today's sunset, and skip
-        # flag-reschedule.timer.
+        # Reschedule run: restart fixed-time timers normally and skip sunset
+        # timers entirely.
         #
-        # Sunset timers were stopped above (before the unit file was rewritten)
-        # and are explicitly started here after daemon-reload.  Persistent=false
-        # in the sunset timer unit ensures no catch-up fire at 02:00 — systemd
-        # simply arms the timer to fire at the configured OnCalendar time.
+        # Sunset timers are left active across the unit-file rewrite.  systemd
+        # re-reads the updated unit file on daemon-reload and re-arms an
+        # *active* timer with the new OnCalendar value automatically — no
+        # stop/start is required or safe to use.
+        #
+        # The previous PR #43 approach (stop→write→reload→start) caused the
+        # timer to fire immediately after "systemctl start", even with
+        # Persistent=false, because systemd's internal next-elapse calculation
+        # can treat today's OnCalendar event as missed immediately after a
+        # stop+reload cycle.  Leaving the timer active and relying on
+        # daemon-reload re-arming is the correct fix.
         for name in sorted(written_names):
             timer_name = f"flag-{name}.timer"
-            if name in stopped_sunset_names:
-                # Sunset timer: start it to arm it for today's sunset.
-                # Persistent=false means systemd will NOT fire a catch-up at
-                # 02:00 — it simply waits until OnCalendar (sunset) arrives.
+            if name in sunset_times:
+                # Sunset timer: already-active timer re-armed by daemon-reload.
+                # Do NOT stop/start — that would cause spurious immediate fire.
                 sun_hour, sun_minute = sunset_times[name]
                 _log.info(
-                    "Starting sunset timer %s after unit update; next trigger at %02d:%02d",
+                    "  ✅ %s: unit updated (OnCalendar=%02d:%02d); "
+                    "already-active timer re-armed by daemon-reload",
                     timer_name, sun_hour, sun_minute,
                 )
-                try:
-                    _run_systemctl("start", timer_name)
-                    print(
-                        f"  ✅ {timer_name}: started (OnCalendar={sun_hour:02d}:{sun_minute:02d}), "
-                        f"next trigger at {sun_hour:02d}:{sun_minute:02d}"
-                    )
-                    _log.info("Started sunset timer %s successfully", timer_name)
-                except RuntimeError as exc:
-                    print(f"  ⚠️  Could not start {timer_name}: {exc}")
-                    _log.error("Could not start %s: %s", timer_name, exc)
+                print(
+                    f"  ✅ {timer_name}: unit updated (OnCalendar={sun_hour:02d}:{sun_minute:02d}); "
+                    f"already-active timer re-armed by daemon-reload"
+                )
             else:
                 # Fixed-time timer: safe to restart because OnCalendar (e.g.
                 # 08:00) has not yet elapsed at the 02:00 reschedule time.
