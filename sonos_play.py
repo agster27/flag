@@ -232,7 +232,10 @@ def main():
         )
         quiet_end = 7
 
-    now_hour = datetime.now().hour
+    # Capture the current time once so the same instant is used for both the
+    # quiet-hours check and all log/print messages in this guard block.
+    _now = datetime.now()
+    now_hour = _now.hour
     # Handle both wrap-around window (e.g. 22→7 spans midnight, start > end)
     # and non-wrap window (e.g. 1→5 within a single day, start < end).
     if quiet_start > quiet_end:
