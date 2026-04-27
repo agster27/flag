@@ -591,3 +591,152 @@ class TestSunsetOffsetIntegration(unittest.TestCase):
         self.assertEqual(called_offset, -5,
                          "Expected offset of -5 for 'sunset-5min'")
 
+
+# ---------------------------------------------------------------------------
+# Tests for stacked-offset decoupling and midnight-wrap guard (Bugs #1 & #2)
+# ---------------------------------------------------------------------------
+
+class TestSunsetOffsetDecouplingAndWrap(unittest.TestCase):
+    """
+    Verify Bug #1 fix: per-entry offset is absolute (config sunset_offset_minutes
+    is ignored), and Bug #2 fix: midnight wrap raises ValueError.
+    """
+
+    _BASE_CONFIG = {
+        "speakers": ["192.168.1.100"],
+        "volume": 30,
+        "city": "TestCity",
+        "country": "TC",
+        "latitude": 40.7128,
+        "longitude": -74.0060,
+        "timezone": "America/New_York",
+        "sunset_offset_minutes": 30,
+        "schedules": [],
+    }
+
+    def _make_sun_return(self, hour, minute, tz_name="America/New_York"):
+        """
+        Return a dict whose ``"sunset"`` key is a timezone-aware datetime
+        for today at the given hour:minute in tz_name.
+        """
+        import pytz
+        from datetime import date, datetime as dt
+        tz = pytz.timezone(tz_name)
+        today = date.today()
+        naive = dt(today.year, today.month, today.day, hour, minute, 0)
+        aware = tz.localize(naive, is_dst=False)
+        return {"sunset": aware}
+
+    def test_stacked_offset_decoupled(self):
+        """
+        get_sunset_local_time_with_offset must use ONLY extra_offset_minutes.
+        With sunset_offset_minutes=30 and extra_offset_minutes=-5 the result
+        must be sunset-5min (18:55 if sunset is 19:00), NOT sunset+25min.
+        """
+        import schedule_sonos
+
+        sun_data = self._make_sun_return(19, 0)
+        with patch("schedule_sonos.sun", return_value=sun_data):
+            h, m = schedule_sonos.get_sunset_local_time_with_offset(
+                self._BASE_CONFIG, -5
+            )
+        self.assertEqual((h, m), (18, 55),
+                         "Per-entry offset must be absolute, not stacked with config offset")
+
+    def test_forward_wrap_raises(self):
+        """
+        get_sunset_local_time_with_offset must raise ValueError when offset
+        pushes the result past midnight into the next day.
+        """
+        import schedule_sonos
+
+        # Sunset at 23:50 + 30 minutes crosses midnight
+        sun_data = self._make_sun_return(23, 50)
+        with patch("schedule_sonos.sun", return_value=sun_data):
+            with self.assertRaises(ValueError) as ctx:
+                schedule_sonos.get_sunset_local_time_with_offset(
+                    self._BASE_CONFIG, 30
+                )
+        self.assertIn("crosses midnight", str(ctx.exception))
+
+    def test_backward_wrap_raises(self):
+        """
+        get_sunset_local_time_with_offset must raise ValueError when a large
+        negative offset wraps back to the previous day (high-latitude winter).
+        """
+        import schedule_sonos
+
+        # Sunset at 00:30 − 60 minutes crosses back into the previous day
+        sun_data = self._make_sun_return(0, 30)
+        with patch("schedule_sonos.sun", return_value=sun_data):
+            with self.assertRaises(ValueError) as ctx:
+                schedule_sonos.get_sunset_local_time_with_offset(
+                    self._BASE_CONFIG, -60
+                )
+        self.assertIn("crosses midnight", str(ctx.exception))
+
+    def test_plain_sunset_wrap_raises(self):
+        """
+        get_sunset_local_time must raise ValueError when config
+        sunset_offset_minutes causes a midnight wrap.
+        """
+        import schedule_sonos
+
+        config = dict(self._BASE_CONFIG, sunset_offset_minutes=30)
+        # Sunset at 23:50 + 30 min config offset crosses midnight
+        sun_data = self._make_sun_return(23, 50)
+        with patch("schedule_sonos.sun", return_value=sun_data):
+            with self.assertRaises(ValueError) as ctx:
+                schedule_sonos.get_sunset_local_time(config)
+        self.assertIn("crosses midnight", str(ctx.exception))
+
+    def test_main_skips_wrap_entry_processes_others(self):
+        """
+        main() must skip a schedule entry whose sunset offset crosses midnight
+        (ValueError from get_sunset_local_time_with_offset) while still
+        processing other valid entries.
+        """
+        import schedule_sonos
+
+        config = {
+            "speakers": ["192.168.1.100"],
+            "volume": 30,
+            "city": "TestCity",
+            "country": "TC",
+            "latitude": 40.7128,
+            "longitude": -74.0060,
+            "timezone": "America/New_York",
+            "schedules": [
+                {
+                    "name": "wrap-entry",
+                    "time": "sunset+700min",
+                    "audio_url": "http://example.com/wrap.mp3",
+                },
+                {
+                    "name": "fixed-entry",
+                    "time": "08:00",
+                    "audio_url": "http://example.com/fixed.mp3",
+                },
+            ],
+        }
+
+        def _offset_raises(cfg, offset):
+            raise ValueError("Sunset offset crosses midnight in America/New_York: ...")
+
+        with patch("os.getuid", return_value=0), \
+             patch("schedule_sonos.load_config", return_value=config), \
+             patch("schedule_sonos._write_unit_file"), \
+             patch("schedule_sonos._clean_stale_units"), \
+             patch("schedule_sonos.get_sunset_local_time_with_offset",
+                   side_effect=_offset_raises), \
+             patch("schedule_sonos._is_timer_enabled", return_value=False), \
+             patch("schedule_sonos._run_systemctl") as mock_ctl:
+            schedule_sonos.main()
+
+        # _run_systemctl("enable", "--now", timer_name) — last arg is the unit name
+        enabled_units = [c.args[-1] for c in mock_ctl.call_args_list
+                         if c.args[0] == "enable"]
+        self.assertNotIn("flag-wrap-entry.timer", enabled_units,
+                         "Wrap entry must be skipped (not enabled)")
+        self.assertIn("flag-fixed-entry.timer", enabled_units,
+                      "Valid fixed-time entry must still be processed")

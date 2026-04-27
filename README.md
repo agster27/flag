@@ -263,7 +263,7 @@ This means if Speaker A was playing Spotify before Colors, it will resume playin
 | `skip_restore_if_idle` | If `true`, do not restore prior playback when a speaker was idle before the bugle call |
 | `latitude` / `longitude` | Your coordinates, used to calculate local sunset time |
 | `timezone` | IANA timezone name (e.g. `"America/New_York"`) |
-| `sunset_offset_minutes` | Optional offset in minutes from sunset (negative = before, positive = after). Defaults to `0` |
+| `sunset_offset_minutes` | Optional offset in minutes applied only to the plain `"sunset"` time string (negative = before, positive = after). Defaults to `0`. This value is **ignored** when a per-entry `"sunset±Nmin"` offset is used; those entries are always relative to true sunset. |
 
 ### `speakers` array
 
@@ -301,7 +301,7 @@ Each entry in `schedules` defines one scheduled audio play:
 |-------|-------------|
 | `name` | Unique name used as the systemd unit suffix (`flag-{name}.service` / `flag-{name}.timer`). Must contain only letters, numbers, hyphens, and underscores. |
 | `audio_url` | Full HTTP URL of the MP3 to play (served by the built-in audio HTTP server). |
-| `time` | When to play. Accepted formats: `"HH:MM"` (24-hour local time), `"sunset"` (today's sunset ± any `sunset_offset_minutes` from config), or `"sunset±Nmin"` (e.g. `"sunset-5min"`, `"sunset+1min"`) where N is 1–720. |
+| `time` | When to play. Accepted formats: `"HH:MM"` (24-hour local time), `"sunset"` (today's sunset ± `sunset_offset_minutes` from config), or `"sunset±Nmin"` (e.g. `"sunset-5min"`, `"sunset+1min"`) where N is 1–720 and is always relative to **true sunset** (config `sunset_offset_minutes` is ignored for these). |
 
 #### Accepted `time` formats
 
@@ -309,8 +309,8 @@ Each entry in `schedules` defines one scheduled audio play:
 |--------|---------|-------------|
 | `"HH:MM"` | `"07:55"` | Fixed 24-hour local time (hour 0–23, minute 0–59). |
 | `"sunset"` | `"sunset"` | Today's sunset in local time, offset by the top-level `sunset_offset_minutes` config value. |
-| `"sunset-Nmin"` | `"sunset-5min"` | N minutes **before** sunset (1–720). |
-| `"sunset+Nmin"` | `"sunset+1min"` | N minutes **after** sunset (1–720). |
+| `"sunset-Nmin"` | `"sunset-5min"` | N minutes **before** true sunset (1–720). The top-level `sunset_offset_minutes` is **ignored**; the N is an absolute offset from actual sunset. |
+| `"sunset+Nmin"` | `"sunset+1min"` | N minutes **after** true sunset (1–720). The top-level `sunset_offset_minutes` is **ignored**; the N is an absolute offset from actual sunset. |
 
 Sunset-offset timers (`sunset-Nmin` / `sunset+Nmin`) are treated the same as plain `"sunset"` timers for scheduling purposes — they are recomputed daily at 02:00 by `flag-reschedule.timer` and on every boot by `flag-boot-reschedule.service`, with no stop/start cycle required.
 

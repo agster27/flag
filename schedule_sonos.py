@@ -188,7 +188,10 @@ def get_sunset_local_time(config):
     Calculate today's sunset hour and minute in the configured local timezone.
 
     Applies the optional ``sunset_offset_minutes`` config value as a positive
-    or negative offset from the actual sunset time.
+    or negative offset from the actual sunset time.  This offset is used only
+    when the schedule entry's ``time`` is the plain ``"sunset"`` string; it is
+    **not** applied when ``"sunset±Nmin"`` entries are used (see
+    :func:`get_sunset_local_time_with_offset`).
 
     Args:
         config (dict): Parsed configuration dictionary.
@@ -200,6 +203,8 @@ def get_sunset_local_time(config):
     Raises:
         ValueError: If the sun never sets at this location today (polar day/
             night), which ``astral`` signals by raising ``ValueError``.
+        ValueError: If the offset pushes the resulting time to a different
+            calendar day than today's sunset (midnight wrap-around).
     """
     loc = get_location(config)
     tz_obj = pytz.timezone(loc.timezone)
@@ -208,21 +213,34 @@ def get_sunset_local_time(config):
     sunset = s["sunset"]
     sunset_time = sunset + timedelta(minutes=config.get("sunset_offset_minutes", 0))
     sunset_local = sunset_time.astimezone(tz_obj)
+    sunset_unadjusted_local = sunset.astimezone(tz_obj)
+    if sunset_local.date() != sunset_unadjusted_local.date():
+        raise ValueError(
+            f"Sunset offset crosses midnight in {tz_obj.zone}: "
+            f"sunset is {sunset_unadjusted_local:%Y-%m-%d %H:%M} but "
+            f"adjusted time is {sunset_local:%Y-%m-%d %H:%M}"
+        )
     return sunset_local.hour, sunset_local.minute
 
 
 def get_sunset_local_time_with_offset(config, extra_offset_minutes: int):
     """
-    Calculate today's sunset hour and minute with an additional per-entry offset.
+    Calculate today's sunset hour and minute with a per-entry signed offset.
 
-    Applies the ``sunset_offset_minutes`` config value *and* an additional
-    ``extra_offset_minutes`` on top, allowing schedule entries with time strings
-    like ``"sunset-5min"`` or ``"sunset+1min"``.
+    This function is used for schedule entries whose ``time`` field uses the
+    ``"sunset±Nmin"`` syntax (e.g. ``"sunset-5min"`` or ``"sunset+1min"``).
+    It applies **only** ``extra_offset_minutes`` to the true sunset time;
+    the top-level ``sunset_offset_minutes`` config value is intentionally
+    **ignored** so that the N in ``"sunset±Nmin"`` is always an absolute
+    offset from the actual sunset, regardless of any global config offset.
+
+    The top-level ``sunset_offset_minutes`` applies exclusively to plain
+    ``"sunset"`` entries (handled by :func:`get_sunset_local_time`).
 
     Args:
         config (dict): Parsed configuration dictionary.
-        extra_offset_minutes (int): Additional signed offset in minutes to add
-            on top of the ``sunset_offset_minutes`` config value.
+        extra_offset_minutes (int): Signed offset in minutes from true sunset
+            (negative = before sunset, positive = after sunset).
 
     Returns:
         tuple[int, int]: ``(hour, minute)`` in local time of the adjusted sunset.
@@ -230,14 +248,22 @@ def get_sunset_local_time_with_offset(config, extra_offset_minutes: int):
     Raises:
         ValueError: If the sun never sets at this location today (polar day/
             night), which ``astral`` signals by raising ``ValueError``.
+        ValueError: If the offset pushes the resulting time to a different
+            calendar day than today's sunset (midnight wrap-around).
     """
     loc = get_location(config)
     tz_obj = pytz.timezone(loc.timezone)
     s = sun(loc.observer, date=datetime.now().date(), tzinfo=tz_obj)
     sunset = s["sunset"]
-    total_offset = config.get("sunset_offset_minutes", 0) + extra_offset_minutes
-    sunset_time = sunset + timedelta(minutes=total_offset)
+    sunset_time = sunset + timedelta(minutes=extra_offset_minutes)
     sunset_local = sunset_time.astimezone(tz_obj)
+    sunset_unadjusted_local = sunset.astimezone(tz_obj)
+    if sunset_local.date() != sunset_unadjusted_local.date():
+        raise ValueError(
+            f"Sunset offset crosses midnight in {tz_obj.zone}: "
+            f"sunset is {sunset_unadjusted_local:%Y-%m-%d %H:%M} but "
+            f"adjusted time is {sunset_local:%Y-%m-%d %H:%M}"
+        )
     return sunset_local.hour, sunset_local.minute
 
 
