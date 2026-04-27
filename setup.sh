@@ -8,7 +8,7 @@
 set -e
 set -o pipefail
 
-SETUP_VERSION="2.3.0"
+SETUP_VERSION="2.4.0"
 
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"
@@ -1199,45 +1199,160 @@ function prompt_menu() {
 }
 
 function uninstall_all() {
-    echo ""
-    read -rp "  ⚠️  This will permanently remove all files and systemd services/timers. Are you sure? [y/N]: " CONFIRM
-    if [[ "${CONFIRM,,}" != "y" ]]; then
-        echo "  Uninstall cancelled."
-        return
+    # Optional first argument: "--yes" or "-y" to skip confirmation prompt.
+    local _skip_confirm=false
+    if [[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]]; then
+        _skip_confirm=true
     fi
+
+    if [ "$_skip_confirm" = false ]; then
+        echo ""
+        read -rp "  ⚠️  This will permanently remove all files and systemd services/timers. Are you sure? [y/N]: " CONFIRM
+        if [[ "${CONFIRM,,}" != "y" ]]; then
+            echo "  Uninstall cancelled."
+            return
+        fi
+    fi
+
     log "🚨 Uninstalling Honor Tradition with Tech..."
 
-    # Disable and stop all flag-related timers first.
-    # Iterate over found files individually rather than relying on shell glob
-    # expansion in systemctl arguments, so the loop is safe when no files exist.
-    for timer_file in /etc/systemd/system/flag-*.timer; do
-        [ -f "$timer_file" ] || continue
-        timer_unit=$(basename "$timer_file")
-        maybe_sudo systemctl disable --now "$timer_unit" 2>/dev/null || true
+    local _removed_units=0
+    local _removed_dirs=0
+    local _removed_cron=0
+
+    # -------------------------------------------------------------------------
+    # 1. Systemd units — disable + stop + remove from all known locations.
+    # -------------------------------------------------------------------------
+
+    # All directories that may contain flag-related unit files.
+    local _unit_dirs=(
+        /etc/systemd/system
+        /lib/systemd/system
+        /usr/lib/systemd/system
+    )
+
+    # Legacy unit names that may not match the flag-* glob.
+    local _legacy_units=(
+        sonos-colors.service
+        sonos-colors.timer
+        sonos-taps.service
+        sonos-taps.timer
+    )
+
+    # Disable + stop all flag-*.timer and flag-*.service across all locations.
+    for _dir in "${_unit_dirs[@]}"; do
+        for _timer_file in "$_dir"/flag-*.timer; do
+            [ -f "$_timer_file" ] || continue
+            _unit=$(basename "$_timer_file")
+            maybe_sudo systemctl disable --now "$_unit" 2>/dev/null || true
+        done
+        for _svc_file in "$_dir"/flag-*.service; do
+            [ -f "$_svc_file" ] || continue
+            _unit=$(basename "$_svc_file")
+            maybe_sudo systemctl disable --now "$_unit" 2>/dev/null || true
+        done
     done
 
-    # Disable and stop all flag-related services
-    for service_file in /etc/systemd/system/flag-*.service; do
-        [ -f "$service_file" ] || continue
-        service_unit=$(basename "$service_file")
-        maybe_sudo systemctl disable --now "$service_unit" 2>/dev/null || true
+    # Disable + stop legacy unit names if present.
+    for _unit in "${_legacy_units[@]}"; do
+        maybe_sudo systemctl disable --now "$_unit" 2>/dev/null || true
     done
 
-    # Remove all flag unit files and reload systemd
-    maybe_sudo rm -f /etc/systemd/system/flag-*.timer
-    maybe_sudo rm -f /etc/systemd/system/flag-*.service
+    # Remove unit files from all locations.
+    for _dir in "${_unit_dirs[@]}"; do
+        for _f in "$_dir"/flag-*.timer "$_dir"/flag-*.service; do
+            [ -f "$_f" ] || continue
+            maybe_sudo rm -f "$_f" && (( _removed_units++ )) || true
+        done
+        for _unit in "${_legacy_units[@]}"; do
+            if [ -f "$_dir/$_unit" ]; then
+                maybe_sudo rm -f "$_dir/$_unit" && (( _removed_units++ )) || true
+            fi
+        done
+    done
+
     maybe_sudo systemctl daemon-reload
+    maybe_sudo systemctl reset-failed 2>/dev/null || true
 
-    maybe_sudo rm -rf "$INSTALL_DIR"
+    # -------------------------------------------------------------------------
+    # 2. Install directory.
+    # -------------------------------------------------------------------------
+    if [ -d "$INSTALL_DIR" ]; then
+        maybe_sudo rm -rf "$INSTALL_DIR"
+        (( _removed_dirs++ )) || true
+        log "🗑️  Removed: $INSTALL_DIR"
+    else
+        log "⏭️  Skipped (not present): $INSTALL_DIR"
+    fi
 
-    # Remove setup.sh itself if it lives outside INSTALL_DIR
+    # -------------------------------------------------------------------------
+    # 3. Legacy install locations from older versions.
+    # -------------------------------------------------------------------------
+    local _legacy_dirs=(
+        "/opt/sonos-flag"
+        "/opt/honor-tradition"
+        "$HOME/flag"
+        "$HOME/sonos-flag"
+    )
+    for _ldir in "${_legacy_dirs[@]}"; do
+        if [ -d "$_ldir" ]; then
+            maybe_sudo rm -rf "$_ldir"
+            (( _removed_dirs++ )) || true
+            log "🗑️  Removed legacy dir: $_ldir"
+        else
+            log "⏭️  Skipped (not present): $_ldir"
+        fi
+    done
+
+    # -------------------------------------------------------------------------
+    # 4. Cron entries — remove any lines referencing flag-related scripts for
+    #    both the current user and root.
+    # -------------------------------------------------------------------------
+    local _cron_pattern='flag|sonos_play|schedule_sonos|colors\.mp3|taps\.mp3'
+
+    # Current user crontab.
+    if crontab -l 2>/dev/null | grep -qE "$_cron_pattern"; then
+        local _filtered
+        _filtered=$(crontab -l 2>/dev/null | grep -vE "$_cron_pattern" || true)
+        if [ -z "$_filtered" ]; then
+            crontab -r 2>/dev/null || true
+        else
+            echo "$_filtered" | crontab -
+        fi
+        (( _removed_cron++ )) || true
+        log "🗑️  Removed matching cron entries for current user."
+    fi
+
+    # Root crontab.
+    if sudo crontab -l -u root 2>/dev/null | grep -qE "$_cron_pattern"; then
+        local _root_filtered
+        _root_filtered=$(sudo crontab -l -u root 2>/dev/null | grep -vE "$_cron_pattern" || true)
+        if [ -z "$_root_filtered" ]; then
+            sudo crontab -r -u root 2>/dev/null || true
+        else
+            echo "$_root_filtered" | sudo crontab -u root -
+        fi
+        (( _removed_cron++ )) || true
+        log "🗑️  Removed matching cron entries for root."
+    fi
+
+    # -------------------------------------------------------------------------
+    # 5. Remove setup.sh itself if it lives outside INSTALL_DIR.
+    # -------------------------------------------------------------------------
     SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
     case "$SELF" in
         "$INSTALL_DIR"/*) ;;  # already deleted with INSTALL_DIR
         *) maybe_sudo rm -f "$SELF" ;;
     esac
 
-    echo "✅ All files, systemd timers, and services removed!"
+    # -------------------------------------------------------------------------
+    # Summary
+    # -------------------------------------------------------------------------
+    echo ""
+    echo "✅ Uninstall complete."
+    echo "   • Systemd unit files removed: $_removed_units"
+    echo "   • Install directories removed: $_removed_dirs"
+    echo "   • Crontab user entries cleaned: $_removed_cron"
     exit 0
 }
 
@@ -1406,6 +1521,167 @@ function upgrade_scripts() {
         fi
     done
 
+    # -------------------------------------------------------------------------
+    # Whitelist-based cleanup — remove deprecated top-level files.
+    # Directories audio/ and sonos-env/ (and dotfiles) are always preserved.
+    # -------------------------------------------------------------------------
+    local _whitelist=(
+        audio_check.py
+        config.json
+        config.py
+        requirements.txt
+        schedule_sonos.py
+        setup.sh
+        sonos_play.py
+        setup.log
+        sonos_play.log
+    )
+
+    local _deprecated_count=0
+
+    log "🧹 Checking for deprecated top-level files..."
+    for _f in "$INSTALL_DIR"/*; do
+        [ -e "$_f" ] || continue
+        _name=$(basename "$_f")
+
+        # Preserve directories (audio/, sonos-env/) and dotfiles.
+        if [ -d "$_f" ] || [[ "$_name" == .* ]]; then
+            continue
+        fi
+
+        # Check if the file is on the whitelist.
+        local _keep=false
+        for _w in "${_whitelist[@]}"; do
+            if [ "$_name" = "$_w" ]; then
+                _keep=true
+                break
+            fi
+        done
+
+        if [ "$_keep" = false ]; then
+            rm -f "$_f" || true
+            (( _deprecated_count++ )) || true
+            log "🧹 Removed deprecated file: $_name"
+        fi
+    done
+
+    # -------------------------------------------------------------------------
+    # Remove specific known-deprecated artifacts.
+    # -------------------------------------------------------------------------
+
+    # Top-level MP3 stubs (audio files used to live at top level before audio/).
+    for _mp3 in "$INSTALL_DIR/colors.mp3" "$INSTALL_DIR/taps.mp3"; do
+        if [ -f "$_mp3" ]; then
+            rm -f "$_mp3" || true
+            (( _deprecated_count++ )) || true
+            log "🧹 Removed deprecated file: $(basename "$_mp3")"
+        fi
+    done
+
+    # Stale config backups.
+    for _bak in "$INSTALL_DIR"/*.bak; do
+        [ -f "$_bak" ] || continue
+        rm -f "$_bak" || true
+        (( _deprecated_count++ )) || true
+        log "🧹 Removed deprecated file: $(basename "$_bak")"
+    done
+
+    # Python bytecode artifacts.
+    if [ -d "$INSTALL_DIR/__pycache__" ]; then
+        rm -rf "$INSTALL_DIR/__pycache__" || true
+        (( _deprecated_count++ )) || true
+        log "🧹 Removed: __pycache__/"
+    fi
+    for _pyc in "$INSTALL_DIR"/*.pyc; do
+        [ -f "$_pyc" ] || continue
+        rm -f "$_pyc" || true
+        (( _deprecated_count++ )) || true
+        log "🧹 Removed deprecated file: $(basename "$_pyc")"
+    done
+
+    # Old venv directory names alongside the current one.
+    for _old_venv in "$INSTALL_DIR/venv" "$INSTALL_DIR/.venv"; do
+        if [ -d "$_old_venv" ]; then
+            rm -rf "$_old_venv" || true
+            (( _deprecated_count++ )) || true
+            log "🧹 Removed old venv: $(basename "$_old_venv")"
+        fi
+    done
+
+    # -------------------------------------------------------------------------
+    # Stale systemd units — remove flag-* timer/service units that no longer
+    # correspond to a schedule in config.json, and legacy sonos-* units.
+    # -------------------------------------------------------------------------
+    local _stale_unit_count=0
+
+    # Explicit legacy unit names (from older installs).
+    local _legacy_units=(
+        sonos-colors.service
+        sonos-colors.timer
+        sonos-taps.service
+        sonos-taps.timer
+    )
+    for _unit in "${_legacy_units[@]}"; do
+        if [ -f "/etc/systemd/system/$_unit" ]; then
+            maybe_sudo systemctl disable --now "$_unit" 2>/dev/null || true
+            maybe_sudo rm -f "/etc/systemd/system/$_unit" || true
+            (( _stale_unit_count++ )) || true
+            log "🧹 Removed legacy unit: $_unit"
+        fi
+    done
+
+    # Build the set of expected flag-<name>.timer / flag-<name>.service units
+    # from config.json schedules (requires jq, which is a system dependency).
+    if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
+        local _expected_timers=()
+        local _expected_services=("flag-audio-http.service")
+        while IFS= read -r _sched_name; do
+            [ -n "$_sched_name" ] || continue
+            _expected_timers+=("flag-${_sched_name}.timer")
+            _expected_services+=("flag-${_sched_name}.service")
+        done < <(jq -r '.schedules[]?.name // empty' "$CONFIG_FILE" 2>/dev/null || true)
+
+        # Remove any flag-*.timer not in the expected set.
+        for _timer_file in /etc/systemd/system/flag-*.timer; do
+            [ -f "$_timer_file" ] || continue
+            _unit=$(basename "$_timer_file")
+            local _expected=false
+            for _e in "${_expected_timers[@]}"; do
+                if [ "$_unit" = "$_e" ]; then
+                    _expected=true
+                    break
+                fi
+            done
+            if [ "$_expected" = false ]; then
+                maybe_sudo systemctl disable --now "$_unit" 2>/dev/null || true
+                maybe_sudo rm -f "$_timer_file" || true
+                (( _stale_unit_count++ )) || true
+                log "🧹 Removed stale timer unit: $_unit"
+            fi
+        done
+
+        # Remove any flag-*.service not in the expected set.
+        for _svc_file in /etc/systemd/system/flag-*.service; do
+            [ -f "$_svc_file" ] || continue
+            _unit=$(basename "$_svc_file")
+            local _expected=false
+            for _e in "${_expected_services[@]}"; do
+                if [ "$_unit" = "$_e" ]; then
+                    _expected=true
+                    break
+                fi
+            done
+            if [ "$_expected" = false ]; then
+                maybe_sudo systemctl disable --now "$_unit" 2>/dev/null || true
+                maybe_sudo rm -f "$_svc_file" || true
+                (( _stale_unit_count++ )) || true
+                log "🧹 Removed stale service unit: $_unit"
+            fi
+        done
+    fi
+
+    maybe_sudo systemctl daemon-reload
+
     log "🔑 Setting execute permissions on Python scripts..."
     find "$INSTALL_DIR" -maxdepth 1 -type f -name "*.py" -exec chmod +x {} \;
 
@@ -1420,8 +1696,64 @@ function upgrade_scripts() {
     log "🗓️  Regenerating systemd timer units..."
     maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
 
+    log ""
     log "✅ Upgrade complete. Your config.json was not changed."
+    log "   🧹 Cleanup summary: $_deprecated_count deprecated file(s) removed, $_stale_unit_count stale unit(s) removed."
 }
+
+# ---------------------------------------------------------------------------
+# CLI argument parsing — must come after all function definitions so that
+# calling uninstall_all here works correctly.
+# ---------------------------------------------------------------------------
+
+function _print_usage() {
+    cat <<EOF
+Usage: $(basename "$0") [COMMAND] [OPTIONS]
+
+Commands:
+  uninstall          Completely remove the Flag installation (prompts for confirmation).
+  --help, -h         Show this help text and exit.
+
+Options (for uninstall):
+  --yes, -y          Skip the confirmation prompt (for scripted / remote teardown).
+
+Aliases for uninstall: --uninstall, -u
+
+Examples:
+  ./setup.sh                    # Interactive menu (default)
+  ./setup.sh uninstall          # Uninstall with confirmation prompt
+  ./setup.sh uninstall --yes    # Uninstall without prompting
+  ./setup.sh --help             # Show this help text
+EOF
+}
+
+if [[ $# -gt 0 ]]; then
+    _CMD="${1:-}"
+    _YES_FLAG=""
+
+    # Detect --yes / -y anywhere in the argument list.
+    for _arg in "$@"; do
+        if [[ "$_arg" == "--yes" || "$_arg" == "-y" ]]; then
+            _YES_FLAG="--yes"
+        fi
+    done
+
+    case "$_CMD" in
+        uninstall|--uninstall|-u)
+            uninstall_all $_YES_FLAG
+            ;;
+        --help|-h)
+            _print_usage
+            exit 0
+            ;;
+        *)
+            echo "Error: unrecognised argument '$_CMD'" >&2
+            echo "" >&2
+            _print_usage >&2
+            exit 1
+            ;;
+    esac
+fi
 
 # ---------------------------------------------------------------------------
 

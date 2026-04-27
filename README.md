@@ -27,6 +27,34 @@
 
 ---
 
+---
+
+## ⌨️ Command-line Usage
+
+In addition to the interactive menu, `setup.sh` supports non-interactive CLI invocation:
+
+```bash
+# Show help / usage summary
+./setup.sh --help
+
+# Uninstall interactively (prompts for confirmation)
+./setup.sh uninstall
+
+# Uninstall without any prompt — useful for scripted or remote teardown
+./setup.sh uninstall --yes
+```
+
+| Command | Description |
+|---------|-------------|
+| `./setup.sh` | Launch the interactive menu (default) |
+| `./setup.sh uninstall` | Remove all files, systemd units, legacy dirs, and cron entries; prompts `[y/N]` |
+| `./setup.sh uninstall --yes` | Same as above but skips the confirmation prompt |
+| `./setup.sh --help` | Print this usage summary and exit |
+
+Aliases: `--uninstall` and `-u` are accepted in place of `uninstall`; `-y` is accepted in place of `--yes`.
+
+---
+
 ## 🚀 Easy Setup
 
 **Download and run the setup script from any directory (e.g., `/root` or `/opt`):**
