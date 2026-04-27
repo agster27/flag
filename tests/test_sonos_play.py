@@ -38,6 +38,8 @@ def _base_config():
         "volume": 30,
         "skip_restore_if_idle": True,
         "default_wait_seconds": 60,
+        # Bypass the quiet-hours guard so tests run at any hour of day/night.
+        "allow_quiet_hours_play": True,
     }
 
 
@@ -804,6 +806,7 @@ class TestPerSpeakerVolume(unittest.TestCase):
             "volume": 30,
             "skip_restore_if_idle": True,
             "default_wait_seconds": 60,
+            "allow_quiet_hours_play": True,
         }
         mock_soco.side_effect = self._make_soco
         mock_snap_cls.return_value = MagicMock()
@@ -850,6 +853,7 @@ class TestPerSpeakerVolume(unittest.TestCase):
             "volume": 30,
             "skip_restore_if_idle": True,
             "default_wait_seconds": 60,
+            "allow_quiet_hours_play": True,
         }
         mock_soco.side_effect = self._make_soco
         mock_snap_cls.return_value = MagicMock()
@@ -890,6 +894,7 @@ class TestPerSpeakerVolume(unittest.TestCase):
             "volume": 45,
             "skip_restore_if_idle": True,
             "default_wait_seconds": 60,
+            "allow_quiet_hours_play": True,
         }
         mock_soco.side_effect = self._make_soco
         mock_snap_cls.return_value = MagicMock()
@@ -929,6 +934,7 @@ class TestPerSpeakerVolume(unittest.TestCase):
             # no global "volume" key
             "skip_restore_if_idle": True,
             "default_wait_seconds": 60,
+            "allow_quiet_hours_play": True,
         }
         mock_soco.side_effect = lambda ip: self.sp1
         mock_snap_cls.return_value = MagicMock()
@@ -946,6 +952,152 @@ class TestPerSpeakerVolume(unittest.TestCase):
 
         # Speaker has explicit volume 50 -> that should be used
         self.assertIn(50, _sp1_volumes, "Speaker with explicit volume 50 should use 50")
+
+
+# ---------------------------------------------------------------------------
+# P0: Quiet-hours guard tests
+# ---------------------------------------------------------------------------
+
+class TestQuietHours(unittest.TestCase):
+    """
+    Verify the quiet-hours guard in sonos_play.main() (P0 defence-in-depth fix).
+
+    The guard refuses to play during configured night hours (default 22:00–07:00)
+    regardless of how the script was invoked, to prevent unintended audio at 2am
+    caused by systemd Persistent=true catch-up fires.
+    """
+
+    def _base_config(self, **overrides):
+        """Minimal config sufficient for the quiet-hours guard tests."""
+        cfg = {
+            "speakers": ["192.168.1.100"],
+            "volume": 30,
+            "skip_restore_if_idle": True,
+            "default_wait_seconds": 60,
+        }
+        cfg.update(overrides)
+        return cfg
+
+    def _mock_datetime(self, hour):
+        """Return a mock datetime class whose .now().hour equals *hour*."""
+        mock_dt = MagicMock()
+        mock_dt.now.return_value.hour = hour
+        mock_dt.now.return_value.isoformat.return_value = f"2026-04-27T{hour:02d}:00:00"
+        return mock_dt
+
+    def test_quiet_hours_refuses_play_at_2am(self):
+        """
+        At 02:00 (inside the default 22→7 window), main() exits 0 without
+        ever calling soco.SoCo (i.e. speaker discovery never starts) and
+        the log contains 'REFUSED:'.
+        """
+        logged = []
+        import sonos_play
+
+        with patch("sonos_play.load_config", return_value=self._base_config()), \
+             patch("sonos_play.datetime", self._mock_datetime(2)), \
+             patch("sonos_play.log", side_effect=lambda m: logged.append(m)), \
+             patch("sonos_play.soco.SoCo") as mock_soco, \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            with self.assertRaises(SystemExit) as ctx:
+                sonos_play.main()
+
+        self.assertEqual(ctx.exception.code, 0,
+                         "Quiet-hours refusal must exit with code 0 (not an error)")
+        mock_soco.assert_not_called()
+        self.assertTrue(
+            any("REFUSED:" in msg for msg in logged),
+            f"Expected 'REFUSED:' in log output; got: {logged}"
+        )
+
+    def test_quiet_hours_allows_play_during_day(self):
+        """
+        At 08:00 (outside the default 22→7 window), the quiet-hours guard
+        does NOT block playback.  We stub out speaker discovery to raise
+        immediately so the test stays fast, but the key assertion is that
+        sys.exit(0) was NOT called by the guard.
+        """
+        import sonos_play
+
+        # Make SoCo raise so the test doesn't hang on network calls;
+        # we only care that the guard let execution reach Phase 0.
+        with patch("sonos_play.load_config", return_value=self._base_config()), \
+             patch("sonos_play.datetime", self._mock_datetime(8)), \
+             patch("sonos_play.log"), \
+             patch("sonos_play.soco.SoCo", side_effect=Exception("offline")), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            with self.assertRaises(SystemExit) as ctx:
+                sonos_play.main()
+
+        # The exit that fires here should be the "all speakers offline" exit(1),
+        # NOT the quiet-hours exit(0).
+        self.assertEqual(ctx.exception.code, 1,
+                         "At 08:00 the guard must not fire; all-speakers-offline "
+                         "exit(1) expected, got code=" + str(ctx.exception.code))
+
+    def test_quiet_hours_wrap_around_window(self):
+        """
+        The 22→7 wrap-around window must correctly classify boundary hours.
+
+        Hour 21 (before quiet start) → allowed.
+        Hours 22, 0, 6 (inside window) → refused.
+        Hour 7 (at quiet end) → allowed.
+        Hour 8 (well after end) → allowed.
+        """
+        cases = [
+            (21, False, "21:00 is before quiet start (22) — should be allowed"),
+            (22, True,  "22:00 is at quiet start — should be refused"),
+            (0,  True,  "00:00 (midnight) is inside 22→7 window — should be refused"),
+            (6,  True,  "06:00 is before quiet end (7) — should be refused"),
+            (7,  False, "07:00 is at quiet end — should be allowed"),
+            (8,  False, "08:00 is after quiet end — should be allowed"),
+        ]
+        import sonos_play
+
+        for hour, should_refuse, reason in cases:
+            with self.subTest(hour=hour, should_refuse=should_refuse):
+                logged = []
+                with patch("sonos_play.load_config", return_value=self._base_config()), \
+                     patch("sonos_play.datetime", self._mock_datetime(hour)), \
+                     patch("sonos_play.log", side_effect=lambda m: logged.append(m)), \
+                     patch("sonos_play.soco.SoCo", side_effect=Exception("offline")), \
+                     patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+                    with self.assertRaises(SystemExit) as ctx:
+                        sonos_play.main()
+
+                if should_refuse:
+                    self.assertEqual(ctx.exception.code, 0,
+                                     f"Hour {hour}: expected quiet-hours exit(0). {reason}")
+                    self.assertTrue(any("REFUSED:" in m for m in logged),
+                                    f"Hour {hour}: expected 'REFUSED:' in log. {reason}")
+                else:
+                    self.assertEqual(ctx.exception.code, 1,
+                                     f"Hour {hour}: guard must not fire; expected exit(1) from "
+                                     f"all-speakers-offline path. {reason}")
+
+    def test_quiet_hours_override_flag(self):
+        """
+        With ``allow_quiet_hours_play: true`` in config, playback at 03:00
+        (inside the default 22→7 quiet window) is NOT refused.
+
+        We stub out speaker discovery so the test stays fast; the key
+        assertion is that the guard does NOT call sys.exit(0).
+        """
+        import sonos_play
+
+        cfg = self._base_config(allow_quiet_hours_play=True)
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sonos_play.datetime", self._mock_datetime(3)), \
+             patch("sonos_play.log"), \
+             patch("sonos_play.soco.SoCo", side_effect=Exception("offline")), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            with self.assertRaises(SystemExit) as ctx:
+                sonos_play.main()
+
+        # Must reach the all-speakers-offline path (exit 1), not the guard (exit 0)
+        self.assertEqual(ctx.exception.code, 1,
+                         "With allow_quiet_hours_play=True the guard must not fire "
+                         "at 03:00; expected exit(1) from all-speakers-offline path")
 
 
 if __name__ == "__main__":
