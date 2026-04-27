@@ -64,7 +64,8 @@ SCHEDULE_SCRIPT = os.path.abspath(__file__)
 _RESERVED_NAMES = {"audio-http", "reschedule", "boot-reschedule"}
 
 # Regex for sunset-offset time strings like "sunset-5min" or "sunset+1min".
-_SUNSET_OFFSET_RE = re.compile(r"^sunset([+-])(\d+)min$")
+# re.IGNORECASE allows "Sunset-5min", "SUNSET+1MIN", etc.
+_SUNSET_OFFSET_RE = re.compile(r"^sunset([+-])(\d+)min$", re.IGNORECASE)
 
 
 def parse_sunset_offset(time_str: str):
@@ -823,17 +824,28 @@ def main():
         audio_url = entry["audio_url"]
         time_str = entry["time"]
 
+        # Normalise once for all comparisons and parsing.  The original
+        # time_str is kept intact for user-facing display output so that
+        # the casing/spacing the user wrote in config.json is echoed back.
+        time_str_normalized = time_str.strip().lower() if isinstance(time_str, str) else time_str
+
         # Resolve the fire time to (hour, minute) in local time.
         # Pre-compute sunset offset (None if not a sunset-offset string) so we
         # don't run the regex twice and can propagate ValueError cleanly.
         try:
-            _sunset_offset = parse_sunset_offset(time_str)
+            _sunset_offset = parse_sunset_offset(time_str_normalized)
         except ValueError as exc:
             print(f"  ⚠️  Skipping '{name}': {exc}")
             _log.warning("Skipping '%s': %s", name, exc)
             continue
-        is_sunset_based = (time_str == "sunset") or (_sunset_offset is not None)
-        if time_str == "sunset":
+        except AttributeError:
+            print(
+                f"  ⚠️  Skipping '{name}': invalid time value '{time_str}' (expected a string)"
+            )
+            _log.warning("Skipping '%s': time value is not a string: %r", name, time_str)
+            continue
+        is_sunset_based = (time_str_normalized == "sunset") or (_sunset_offset is not None)
+        if time_str_normalized == "sunset":
             try:
                 hour, minute = get_sunset_local_time(config)
             except ValueError as exc:
@@ -864,7 +876,7 @@ def main():
             )
         else:
             try:
-                parts = time_str.split(":")
+                parts = time_str_normalized.split(":")
                 if len(parts) != 2:
                     raise ValueError("Expected HH:MM format")
                 hour, minute = int(parts[0]), int(parts[1])
@@ -1063,8 +1075,11 @@ def main():
     print("  flag-boot-reschedule.service  (oneshot on boot)")
     print("")
     print("To verify:   systemctl list-timers --all | grep flag")
-    first_name = sorted(written_names)[0] if written_names else "colors"
-    print(f"To inspect:  journalctl -u flag-{first_name} -n 50")
+    if written_names:
+        first_name = sorted(written_names)[0]
+        print(f"To inspect:  journalctl -u flag-{first_name} -n 50")
+    else:
+        print("To inspect:  journalctl -u 'flag-*' -n 50")
     _log.info("schedule_sonos.py completed successfully")
 
 

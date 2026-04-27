@@ -494,6 +494,38 @@ class TestParseSunsetOffset(unittest.TestCase):
         """'sunset-abcmin' does not match the regex and returns None."""
         self.assertIsNone(self.parse("sunset-abcmin"))
 
+    # --- #5 edge-case additions ---
+
+    def test_leading_zero_returns_negative_5(self):
+        """'sunset-05min' returns -5 (leading-zero N)."""
+        self.assertEqual(self.parse("sunset-05min"), -5)
+
+    def test_multiple_leading_zeros_returns_negative_5(self):
+        """'sunset-0005min' returns -5 (multiple leading zeros)."""
+        self.assertEqual(self.parse("sunset-0005min"), -5)
+
+    def test_no_digits_plus_returns_none(self):
+        """'sunset+min' (no digits) does not match and returns None."""
+        self.assertIsNone(self.parse("sunset+min"))
+
+    def test_no_digits_minus_returns_none(self):
+        """'sunset-min' (no digits) does not match and returns None."""
+        self.assertIsNone(self.parse("sunset-min"))
+
+    def test_empty_string_returns_none(self):
+        """'' (empty string) does not match and returns None."""
+        self.assertIsNone(self.parse(""))
+
+    # --- #6 case-insensitive additions ---
+
+    def test_mixed_case_negative_offset(self):
+        """'Sunset-5min' returns -5 (case-insensitive matching)."""
+        self.assertEqual(self.parse("Sunset-5min"), -5)
+
+    def test_all_caps_positive_offset(self):
+        """'SUNSET+1MIN' returns 1 (fully uppercase)."""
+        self.assertEqual(self.parse("SUNSET+1MIN"), 1)
+
 
 # ---------------------------------------------------------------------------
 # Sunset-offset integration tests
@@ -590,6 +622,59 @@ class TestSunsetOffsetIntegration(unittest.TestCase):
         _, called_offset = mock_offset.call_args.args
         self.assertEqual(called_offset, -5,
                          "Expected offset of -5 for 'sunset-5min'")
+
+    def _config_with_time(self, time_value):
+        """Config with a single entry using the given time value."""
+        return {
+            "speakers": ["192.168.1.100"],
+            "volume": 30,
+            "city": "TestCity",
+            "country": "TC",
+            "latitude": 40.7128,
+            "longitude": -74.0060,
+            "timezone": "America/New_York",
+            "schedules": [
+                {
+                    "name": "test-entry",
+                    "time": time_value,
+                    "audio_url": "http://example.com/test.mp3",
+                },
+            ],
+        }
+
+    def test_mixed_case_sunset_goes_through_sunset_branch(self):
+        """A config entry with time='Sunset' is treated as sunset-based (#6)."""
+        import schedule_sonos
+
+        with patch("os.getuid", return_value=0), \
+             patch("schedule_sonos.load_config",
+                   return_value=self._config_with_time("Sunset")), \
+             patch("schedule_sonos._write_unit_file"), \
+             patch("schedule_sonos._clean_stale_units"), \
+             patch("schedule_sonos.get_sunset_local_time",
+                   return_value=(19, 39)) as mock_sunset, \
+             patch("schedule_sonos._is_timer_enabled", return_value=False), \
+             patch("schedule_sonos._run_systemctl"):
+            schedule_sonos.main()
+
+        mock_sunset.assert_called_once()
+
+    def test_whitespace_sunset_goes_through_sunset_branch(self):
+        """A config entry with time=' sunset ' (whitespace) is treated as sunset-based (#7)."""
+        import schedule_sonos
+
+        with patch("os.getuid", return_value=0), \
+             patch("schedule_sonos.load_config",
+                   return_value=self._config_with_time(" sunset ")), \
+             patch("schedule_sonos._write_unit_file"), \
+             patch("schedule_sonos._clean_stale_units"), \
+             patch("schedule_sonos.get_sunset_local_time",
+                   return_value=(19, 39)) as mock_sunset, \
+             patch("schedule_sonos._is_timer_enabled", return_value=False), \
+             patch("schedule_sonos._run_systemctl"):
+            schedule_sonos.main()
+
+        mock_sunset.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
