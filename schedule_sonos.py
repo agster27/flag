@@ -14,6 +14,17 @@ for the legacy flat ``colors_url`` / ``taps_url`` / ``colors_time`` keys. If tho
 keys are present but ``schedules`` is absent, a deprecation warning is printed and a
 synthetic schedule list is built automatically.
 
+Schedule ``time`` field accepted values
+----------------------------------------
+- ``"HH:MM"`` — fixed 24-hour local time (hour 0–23, minute 0–59).
+- ``"sunset"`` — today's sunset in local time, offset by ``sunset_offset_minutes``
+  from config.json.
+- ``"sunset±Nmin"`` — sunset plus or minus N minutes (e.g. ``"sunset-5min"``,
+  ``"sunset+1min"``).  N must be a positive integer in the range 1–720.
+  Sunset-offset timers are treated the same as plain ``"sunset"`` timers for
+  reschedule purposes: they are re-armed daily at 02:00 by ``flag-reschedule.timer``
+  and on every boot by ``flag-boot-reschedule.service`` without a stop/start cycle.
+
 Multi-speaker note
 ------------------
 This script only generates the unit files that *invoke* ``sonos_play.py``.  The
@@ -51,6 +62,34 @@ SCHEDULE_SCRIPT = os.path.abspath(__file__)
 
 # Name suffixes (after "flag-") of units that must never be removed by stale cleanup
 _RESERVED_NAMES = {"audio-http", "reschedule", "boot-reschedule"}
+
+# Regex for sunset-offset time strings like "sunset-5min" or "sunset+1min".
+_SUNSET_OFFSET_RE = re.compile(r"^sunset([+-])(\d+)min$")
+
+
+def parse_sunset_offset(time_str: str):
+    """Return signed offset in minutes for 'sunset+Nmin' / 'sunset-Nmin', or None.
+
+    Args:
+        time_str (str): The raw time string from a schedule entry.
+
+    Returns:
+        int | None: Signed offset in minutes, or ``None`` if *time_str* does
+        not match the ``sunset±Nmin`` pattern.
+
+    Raises:
+        ValueError: If *time_str* matches the pattern but N is out of range
+            (must be 1–720; use plain ``'sunset'`` for zero offset).
+    """
+    m = _SUNSET_OFFSET_RE.match(time_str.strip())
+    if not m:
+        return None
+    sign, mins = m.group(1), int(m.group(2))
+    if mins <= 0 or mins > 720:
+        raise ValueError(
+            f"Sunset offset out of range: '{time_str}' (must be 1-720 minutes)"
+        )
+    return -mins if sign == "-" else mins
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +207,36 @@ def get_sunset_local_time(config):
     s = sun(loc.observer, date=datetime.now().date(), tzinfo=tz_obj)
     sunset = s["sunset"]
     sunset_time = sunset + timedelta(minutes=config.get("sunset_offset_minutes", 0))
+    sunset_local = sunset_time.astimezone(tz_obj)
+    return sunset_local.hour, sunset_local.minute
+
+
+def get_sunset_local_time_with_offset(config, extra_offset_minutes: int):
+    """
+    Calculate today's sunset hour and minute with an additional per-entry offset.
+
+    Applies the ``sunset_offset_minutes`` config value *and* an additional
+    ``extra_offset_minutes`` on top, allowing schedule entries with time strings
+    like ``"sunset-5min"`` or ``"sunset+1min"``.
+
+    Args:
+        config (dict): Parsed configuration dictionary.
+        extra_offset_minutes (int): Additional signed offset in minutes to add
+            on top of the ``sunset_offset_minutes`` config value.
+
+    Returns:
+        tuple[int, int]: ``(hour, minute)`` in local time of the adjusted sunset.
+
+    Raises:
+        ValueError: If the sun never sets at this location today (polar day/
+            night), which ``astral`` signals by raising ``ValueError``.
+    """
+    loc = get_location(config)
+    tz_obj = pytz.timezone(loc.timezone)
+    s = sun(loc.observer, date=datetime.now().date(), tzinfo=tz_obj)
+    sunset = s["sunset"]
+    total_offset = config.get("sunset_offset_minutes", 0) + extra_offset_minutes
+    sunset_time = sunset + timedelta(minutes=total_offset)
     sunset_local = sunset_time.astimezone(tz_obj)
     return sunset_local.hour, sunset_local.minute
 
@@ -729,6 +798,7 @@ def main():
         time_str = entry["time"]
 
         # Resolve the fire time to (hour, minute) in local time
+        is_sunset_based = (time_str == "sunset") or (parse_sunset_offset(time_str) is not None)
         if time_str == "sunset":
             try:
                 hour, minute = get_sunset_local_time(config)
@@ -746,26 +816,48 @@ def main():
             )
         else:
             try:
-                parts = time_str.split(":")
-                if len(parts) != 2:
-                    raise ValueError("Expected HH:MM format")
-                hour, minute = int(parts[0]), int(parts[1])
-                if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                    raise ValueError(f"Time out of range: {time_str}")
-            except (ValueError, AttributeError):
-                print(
-                    f"  ⚠️  Skipping '{name}': invalid time format '{time_str}' "
-                    "(expected HH:MM with hour 0–23 and minute 0–59, or 'sunset')"
-                )
-                _log.warning(
-                    "Skipping '%s': invalid time format '%s'", name, time_str,
-                )
+                offset = parse_sunset_offset(time_str)
+            except ValueError as exc:
+                print(f"  ⚠️  Skipping '{name}': {exc}")
+                _log.warning("Skipping '%s': %s", name, exc)
                 continue
-            _log.info(
-                "Schedule '%s': fixed time %s %s "
-                "(OnCalendar=*-*-* %02d:%02d:00, Persistent=false)",
-                name, time_str, tz_name, hour, minute,
-            )
+            if offset is not None:
+                try:
+                    hour, minute = get_sunset_local_time_with_offset(config, offset)
+                except ValueError as exc:
+                    print(
+                        f"  ⚠️  Skipping '{name}': cannot compute sunset for today — {exc}"
+                    )
+                    _log.warning("Skipping '%s': cannot compute sunset for today — %s", name, exc)
+                    continue
+                _log.info(
+                    "Schedule '%s': %s → %02d:%02d %s "
+                    "(OnCalendar=*-*-* %02d:%02d:00, Persistent=false)",
+                    name, time_str, hour, minute, tz_name, hour, minute,
+                )
+            else:
+                try:
+                    parts = time_str.split(":")
+                    if len(parts) != 2:
+                        raise ValueError("Expected HH:MM format")
+                    hour, minute = int(parts[0]), int(parts[1])
+                    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                        raise ValueError(f"Time out of range: {time_str}")
+                except (ValueError, AttributeError):
+                    print(
+                        f"  ⚠️  Skipping '{name}': invalid time format '{time_str}' "
+                        "(expected HH:MM (00–23 / 00–59), 'sunset', or 'sunset±Nmin' "
+                        "(e.g. 'sunset-5min'))"
+                    )
+                    _log.warning(
+                        "Skipping '%s': invalid time format '%s'", name, time_str,
+                    )
+                    continue
+                _log.info(
+                    "Schedule '%s': fixed time %s %s "
+                    "(OnCalendar=*-*-* %02d:%02d:00, Persistent=false)",
+                    name, time_str, tz_name, hour, minute,
+                )
 
         service_path = os.path.join(SYSTEMD_DIR, f"flag-{name}.service")
         timer_path = os.path.join(SYSTEMD_DIR, f"flag-{name}.timer")
@@ -789,10 +881,10 @@ def main():
             changed_units.add(name)
 
         written_names.add(name)
-        if time_str == "sunset":
+        if is_sunset_based:
             sunset_times[name] = (hour, minute)
         time_display = (
-            f"{hour:02d}:{minute:02d} {tz_name}" if time_str == "sunset"
+            f"{time_str} → {hour:02d}:{minute:02d} {tz_name}" if is_sunset_based
             else f"{time_str} {tz_name}"
         )
         print(

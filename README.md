@@ -1,13 +1,14 @@
 # Honor tradition with tech
 
-🎖️ **Honor tradition with tech** — This project plays the bugle calls **Colors** at 8:00 AM and **Taps** at sunset on one or more Sonos speakers automatically every day.
+🎖️ **Honor tradition with tech** — This project plays a full Navy base bugle-call schedule — Morning Colors, Evening Colors, and Taps — on one or more Sonos speakers automatically every day.
 
 ---
 
 ## 🌟 Features
 
-✅ Play `colors.mp3` at **0800 sharp** every morning  
-🌅 Dynamically calculate **sunset time** to play `taps.mp3`  
+✅ Play **Morning Colors** (First Call → Attention+To the Colors → Carry On) starting at **07:55**  
+🌅 Play **Evening Colors** relative to **sunset** (First Call 5 min before, Retreat 1 min before, To the Colors 1 min after, Carry On 2 min after)  
+🌙 Play **Taps** at **22:00** every night  
 🔊 **Multi-speaker synchronized playback** — configure one or more Sonos speakers; all play in sync via a temporary Sonos group  
 🔇 Pause what's playing and **restore** it after the call — per speaker, including volume  
 📄 Log every playback to `/opt/flag/sonos_play.log`  
@@ -129,18 +130,28 @@ After setup, your `/opt/flag/` folder should look like:
 ├── config.json            # 🔧 Settings (auto-generated if missing)
 ├── sonos-env/             # 🐍 Virtual environment
 └── audio/
-    ├── colors.mp3         # 🎶 Morning bugle call (default included; replace with your own)
-    └── taps.mp3           # 🌅 Evening taps (default included; replace with your own)
+    ├── first_call.mp3     # 🎺 First Call bugle (morning and evening)
+    ├── morning_colors.mp3 # 🎶 Attention + To the Colors (morning)
+    ├── retreat.mp3        # 🎶 Attention + Retreat (evening)
+    ├── evening_colors.mp3 # 🎶 To the Colors (evening, after Retreat)
+    ├── carry_on.mp3       # 🎶 Carry On (morning and evening)
+    └── taps.mp3           # 🌅 Taps (22:00)
 ```
 
 **Systemd unit files** (written by `schedule_sonos.py` to `/etc/systemd/system/`):
 
 ```
-flag-colors.service / flag-colors.timer       # Colors at 08:00
-flag-taps.service   / flag-taps.timer         # Taps at sunset (updated daily)
+flag-morning-first-call.service / flag-morning-first-call.timer   # First Call at 07:55
+flag-morning-colors.service     / flag-morning-colors.timer        # Attention+Colors at 07:59
+flag-morning-carry-on.service   / flag-morning-carry-on.timer      # Carry On at 08:01
+flag-evening-first-call.service / flag-evening-first-call.timer    # First Call at sunset−5 min (updated daily)
+flag-evening-retreat.service    / flag-evening-retreat.timer       # Retreat at sunset−1 min (updated daily)
+flag-evening-colors.service     / flag-evening-colors.timer        # To the Colors at sunset+1 min (updated daily)
+flag-evening-carry-on.service   / flag-evening-carry-on.timer      # Carry On at sunset+2 min (updated daily)
+flag-taps.service               / flag-taps.timer                  # Taps at 22:00
 flag-reschedule.service / flag-reschedule.timer  # Daily 02:00 — recalculates sunset
-flag-boot-reschedule.service                  # Oneshot on boot — recomputes sunset before timers fire
-flag-audio-http.service                       # HTTP audio file server
+flag-boot-reschedule.service                     # Oneshot on boot — recomputes sunset before timers fire
+flag-audio-http.service                          # HTTP audio file server
 ```
 
 ---
@@ -150,10 +161,14 @@ flag-audio-http.service                       # HTTP audio file server
 A systemd-managed HTTP server is set up to serve your audio files directly from `/opt/flag/audio/`.  
 You do **not** need to run `git clone` or start the server manually.
 
-Your files will be available at:
+Your files will be available at (example):
 
-- [http://<your-pi-ip>:8000/colors.mp3](http://<your-pi-ip>:8000/colors.mp3)
-- [http://<your-pi-ip>:8000/taps.mp3](http://<your-pi-ip>:8000/taps.mp3)
+- `http://<your-pi-ip>:8000/first_call.mp3`
+- `http://<your-pi-ip>:8000/morning_colors.mp3`
+- `http://<your-pi-ip>:8000/retreat.mp3`
+- `http://<your-pi-ip>:8000/evening_colors.mp3`
+- `http://<your-pi-ip>:8000/carry_on.mp3`
+- `http://<your-pi-ip>:8000/taps.mp3`
 
 Check the server status or restart it with:
 
@@ -181,14 +196,44 @@ Edit `/opt/flag/config.json` to match your Sonos and preferences:
   "sunset_offset_minutes": 0,
   "schedules": [
     {
-      "name": "colors",
-      "audio_url": "http://192.168.1.10:8000/colors.mp3",
-      "time": "08:00"
+      "name": "morning-first-call",
+      "audio_url": "http://192.168.1.10:8000/first_call.mp3",
+      "time": "07:55"
+    },
+    {
+      "name": "morning-colors",
+      "audio_url": "http://192.168.1.10:8000/morning_colors.mp3",
+      "time": "07:59"
+    },
+    {
+      "name": "morning-carry-on",
+      "audio_url": "http://192.168.1.10:8000/carry_on.mp3",
+      "time": "08:01"
+    },
+    {
+      "name": "evening-first-call",
+      "audio_url": "http://192.168.1.10:8000/first_call.mp3",
+      "time": "sunset-5min"
+    },
+    {
+      "name": "evening-retreat",
+      "audio_url": "http://192.168.1.10:8000/retreat.mp3",
+      "time": "sunset-1min"
+    },
+    {
+      "name": "evening-colors",
+      "audio_url": "http://192.168.1.10:8000/evening_colors.mp3",
+      "time": "sunset+1min"
+    },
+    {
+      "name": "evening-carry-on",
+      "audio_url": "http://192.168.1.10:8000/carry_on.mp3",
+      "time": "sunset+2min"
     },
     {
       "name": "taps",
       "audio_url": "http://192.168.1.10:8000/taps.mp3",
-      "time": "sunset"
+      "time": "22:00"
     }
   ]
 }
@@ -256,7 +301,31 @@ Each entry in `schedules` defines one scheduled audio play:
 |-------|-------------|
 | `name` | Unique name used as the systemd unit suffix (`flag-{name}.service` / `flag-{name}.timer`). Must contain only letters, numbers, hyphens, and underscores. |
 | `audio_url` | Full HTTP URL of the MP3 to play (served by the built-in audio HTTP server). |
-| `time` | When to play: either `"HH:MM"` (24-hour local time) or the special value `"sunset"`. |
+| `time` | When to play. Accepted formats: `"HH:MM"` (24-hour local time), `"sunset"` (today's sunset ± any `sunset_offset_minutes` from config), or `"sunset±Nmin"` (e.g. `"sunset-5min"`, `"sunset+1min"`) where N is 1–720. |
+
+#### Accepted `time` formats
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| `"HH:MM"` | `"07:55"` | Fixed 24-hour local time (hour 0–23, minute 0–59). |
+| `"sunset"` | `"sunset"` | Today's sunset in local time, offset by the top-level `sunset_offset_minutes` config value. |
+| `"sunset-Nmin"` | `"sunset-5min"` | N minutes **before** sunset (1–720). |
+| `"sunset+Nmin"` | `"sunset+1min"` | N minutes **after** sunset (1–720). |
+
+Sunset-offset timers (`sunset-Nmin` / `sunset+Nmin`) are treated the same as plain `"sunset"` timers for scheduling purposes — they are recomputed daily at 02:00 by `flag-reschedule.timer` and on every boot by `flag-boot-reschedule.service`, with no stop/start cycle required.
+
+#### Current Navy base schedule
+
+| Name | Time | Audio file |
+|------|------|------------|
+| `morning-first-call` | `07:55` | `first_call.mp3` |
+| `morning-colors` | `07:59` | `morning_colors.mp3` (Attention + To the Colors) |
+| `morning-carry-on` | `08:01` | `carry_on.mp3` |
+| `evening-first-call` | `sunset-5min` | `first_call.mp3` |
+| `evening-retreat` | `sunset-1min` | `retreat.mp3` (Attention + Retreat) |
+| `evening-colors` | `sunset+1min` | `evening_colors.mp3` (To the Colors) |
+| `evening-carry-on` | `sunset+2min` | `carry_on.mp3` |
+| `taps` | `22:00` | `taps.mp3` |
 
 > **Backward compatibility:** If you have an older install that still uses the flat `colors_url` / `taps_url` / `colors_time` keys, `schedule_sonos.py` will automatically synthesise a schedules list from them and print a deprecation warning. Re-run `setup.sh` → option 6 (Reconfigure) to permanently migrate to the new format.
 

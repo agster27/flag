@@ -443,3 +443,147 @@ class TestBootRescheduleService(unittest.TestCase):
         self.assertEqual(boot_enables, [],
                          "flag-boot-reschedule.service must not be re-enabled "
                          "during a reschedule run")
+
+
+# ---------------------------------------------------------------------------
+# parse_sunset_offset tests
+# ---------------------------------------------------------------------------
+
+class TestParseSunsetOffset(unittest.TestCase):
+    """Unit tests for the parse_sunset_offset() helper."""
+
+    def setUp(self):
+        import schedule_sonos
+        self.parse = schedule_sonos.parse_sunset_offset
+
+    def test_negative_offset(self):
+        """'sunset-5min' returns -5."""
+        self.assertEqual(self.parse("sunset-5min"), -5)
+
+    def test_positive_offset(self):
+        """'sunset+1min' returns 1."""
+        self.assertEqual(self.parse("sunset+1min"), 1)
+
+    def test_max_offset(self):
+        """'sunset+720min' returns 720 (upper boundary)."""
+        self.assertEqual(self.parse("sunset+720min"), 720)
+
+    def test_plain_sunset_returns_none(self):
+        """'sunset' (no offset) returns None."""
+        self.assertIsNone(self.parse("sunset"))
+
+    def test_hhmm_returns_none(self):
+        """'08:00' (fixed time) returns None."""
+        self.assertIsNone(self.parse("08:00"))
+
+    def test_zero_offset_raises(self):
+        """'sunset+0min' is rejected with ValueError (use plain 'sunset' instead)."""
+        with self.assertRaises(ValueError):
+            self.parse("sunset+0min")
+
+    def test_out_of_range_raises(self):
+        """'sunset+1000min' is rejected with ValueError (exceeds 720-minute maximum)."""
+        with self.assertRaises(ValueError):
+            self.parse("sunset+1000min")
+
+    def test_non_numeric_returns_none(self):
+        """'sunset-abcmin' does not match the regex and returns None."""
+        self.assertIsNone(self.parse("sunset-abcmin"))
+
+
+# ---------------------------------------------------------------------------
+# Sunset-offset integration tests
+# ---------------------------------------------------------------------------
+
+class TestSunsetOffsetIntegration(unittest.TestCase):
+    """
+    Verify that sunset-offset schedule entries are handled correctly by main():
+    - Treated as sunset-based (no stop/restart on reschedule runs).
+    - Resolved using get_sunset_local_time_with_offset.
+    """
+
+    def _config_with_sunset_offset(self):
+        """Config with one sunset-offset entry and one fixed-time entry."""
+        return {
+            "speakers": ["192.168.1.100"],
+            "volume": 30,
+            "city": "TestCity",
+            "country": "TC",
+            "latitude": 40.7128,
+            "longitude": -74.0060,
+            "timezone": "America/New_York",
+            "schedules": [
+                {
+                    "name": "evening-first-call",
+                    "time": "sunset-5min",
+                    "audio_url": "http://example.com/first_call.mp3",
+                },
+                {
+                    "name": "morning-colors",
+                    "time": "08:00",
+                    "audio_url": "http://example.com/morning_colors.mp3",
+                },
+            ],
+        }
+
+    def test_sunset_offset_timer_not_stopped_on_reschedule(self):
+        """sunset-offset timer must not be stopped during a reschedule run."""
+        import schedule_sonos
+
+        with patch("os.getuid", return_value=0), \
+             patch("schedule_sonos.load_config",
+                   return_value=self._config_with_sunset_offset()), \
+             patch("schedule_sonos._write_unit_file"), \
+             patch("schedule_sonos._clean_stale_units"), \
+             patch("schedule_sonos.get_sunset_local_time", return_value=(19, 39)), \
+             patch("schedule_sonos.get_sunset_local_time_with_offset",
+                   return_value=(19, 34)), \
+             patch("schedule_sonos._is_timer_enabled", return_value=True), \
+             patch("schedule_sonos._run_systemctl") as mock_ctl:
+            schedule_sonos.main()
+
+        calls = [c.args for c in mock_ctl.call_args_list]
+        self.assertNotIn(("stop", "flag-evening-first-call.timer"), calls,
+                         "Sunset-offset timer must not be stopped during reschedule")
+
+    def test_sunset_offset_timer_not_started_on_reschedule(self):
+        """sunset-offset timer must not be started during a reschedule run."""
+        import schedule_sonos
+
+        with patch("os.getuid", return_value=0), \
+             patch("schedule_sonos.load_config",
+                   return_value=self._config_with_sunset_offset()), \
+             patch("schedule_sonos._write_unit_file"), \
+             patch("schedule_sonos._clean_stale_units"), \
+             patch("schedule_sonos.get_sunset_local_time", return_value=(19, 39)), \
+             patch("schedule_sonos.get_sunset_local_time_with_offset",
+                   return_value=(19, 34)), \
+             patch("schedule_sonos._is_timer_enabled", return_value=True), \
+             patch("schedule_sonos._run_systemctl") as mock_ctl:
+            schedule_sonos.main()
+
+        calls = [c.args for c in mock_ctl.call_args_list]
+        self.assertNotIn(("start", "flag-evening-first-call.timer"), calls,
+                         "Sunset-offset timer must not be started during reschedule")
+
+    def test_sunset_offset_calls_with_offset_helper(self):
+        """main() calls get_sunset_local_time_with_offset for sunset-offset entries."""
+        import schedule_sonos
+
+        with patch("os.getuid", return_value=0), \
+             patch("schedule_sonos.load_config",
+                   return_value=self._config_with_sunset_offset()), \
+             patch("schedule_sonos._write_unit_file"), \
+             patch("schedule_sonos._clean_stale_units"), \
+             patch("schedule_sonos.get_sunset_local_time", return_value=(19, 39)), \
+             patch("schedule_sonos.get_sunset_local_time_with_offset",
+                   return_value=(19, 34)) as mock_offset, \
+             patch("schedule_sonos._is_timer_enabled", return_value=False), \
+             patch("schedule_sonos._run_systemctl"):
+            schedule_sonos.main()
+
+        mock_offset.assert_called_once()
+        _, called_offset = mock_offset.call_args.args
+        self.assertEqual(called_offset, -5,
+                         "Expected offset of -5 for 'sunset-5min'")
+
