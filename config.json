@@ -13,14 +13,44 @@
   "debug": false,
   "schedules": [
     {
-      "name": "colors",
-      "audio_url": "http://flag.aghy.home:8000/colors.mp3",
-      "time": "08:00"
+      "name": "morning-first-call",
+      "audio_url": "http://flag.aghy.home:8000/first_call.mp3",
+      "time": "07:55"
+    },
+    {
+      "name": "morning-colors",
+      "audio_url": "http://flag.aghy.home:8000/morning_colors.mp3",
+      "time": "07:59"
+    },
+    {
+      "name": "morning-carry-on",
+      "audio_url": "http://flag.aghy.home:8000/carry_on.mp3",
+      "time": "08:01"
+    },
+    {
+      "name": "evening-first-call",
+      "audio_url": "http://flag.aghy.home:8000/first_call.mp3",
+      "time": "sunset-5min"
+    },
+    {
+      "name": "evening-retreat",
+      "audio_url": "http://flag.aghy.home:8000/retreat.mp3",
+      "time": "sunset-1min"
+    },
+    {
+      "name": "evening-colors",
+      "audio_url": "http://flag.aghy.home:8000/evening_colors.mp3",
+      "time": "sunset+1min"
+    },
+    {
+      "name": "evening-carry-on",
+      "audio_url": "http://flag.aghy.home:8000/carry_on.mp3",
+      "time": "sunset+2min"
     },
     {
       "name": "taps",
       "audio_url": "http://flag.aghy.home:8000/taps.mp3",
-      "time": "sunset"
+      "time": "22:00"
     }
   ]
 }
