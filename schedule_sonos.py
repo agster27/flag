@@ -13,6 +13,14 @@ Supports an extensible ``schedules`` array in config.json, with backward compati
 for the legacy flat ``colors_url`` / ``taps_url`` / ``colors_time`` keys. If those old
 keys are present but ``schedules`` is absent, a deprecation warning is printed and a
 synthetic schedule list is built automatically.
+
+Multi-speaker note
+------------------
+This script only generates the unit files that *invoke* ``sonos_play.py``.  The
+actual multi-speaker playback logic (speaker discovery, temporary group formation,
+synchronized play, and state restoration) lives entirely in ``sonos_play.py``.
+The ``speakers`` list from config.json is passed through unchanged to each service
+unit so that ``sonos_play.py`` receives it at runtime.
 """
 
 import glob as _glob

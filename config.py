@@ -2,6 +2,11 @@
 config.py — Central configuration loader for the flag project.
 
 Defines install paths and provides load_config() for reading config.json.
+
+The ``speakers`` key in config.json must be a JSON array of one or more Sonos
+speaker IP address strings.  All listed speakers participate in every scheduled
+playback: they are temporarily grouped under the first IP (the coordinator),
+play the audio in sync, and then have their original state restored.
 """
 import json
 import logging
@@ -38,6 +43,12 @@ def validate_config(cfg: dict) -> None:
     Logs warnings for non-critical issues and errors for critical ones
     (e.g. missing ``speakers``).  Does **not** raise — callers decide whether
     to abort based on the log output.
+
+    Key ``speakers`` must be a non-empty list of IP address strings.  Each IP
+    is used by ``sonos_play.py`` to connect to a Sonos device at runtime.  When
+    more than one IP is listed all speakers play the audio simultaneously via a
+    temporary Sonos group (see ``sonos_play.py`` for the full multi-speaker
+    playback flow).
 
     Args:
         cfg (dict): Configuration dictionary returned by :func:`load_config`.
