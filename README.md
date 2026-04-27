@@ -182,14 +182,42 @@ This means if Speaker A was playing Spotify before Colors, it will resume playin
 
 | Key | Description |
 |-----|-------------|
-| `speakers` | **Required.** List of one or more Sonos speaker IP addresses. All speakers play in synchronized playback. |
+| `speakers` | **Required.** Array of speaker entries (see below). All speakers play in synchronized playback. |
 | `port` | Port the HTTP audio server listens on (default: `8000`) |
-| `volume` | Playback volume for the bugle call (0–100). Each speaker's original volume is restored afterward. |
+| `volume` | Default playback volume for the bugle call (0–100). Acts as the fallback when a speaker has no individual `volume`. Each speaker's original volume is restored afterward. |
 | `default_wait_seconds` | Fallback wait time (seconds) if MP3 duration cannot be determined |
 | `skip_restore_if_idle` | If `true`, do not restore prior playback when a speaker was idle before the bugle call |
 | `latitude` / `longitude` | Your coordinates, used to calculate local sunset time |
 | `timezone` | IANA timezone name (e.g. `"America/New_York"`) |
 | `sunset_offset_minutes` | Optional offset in minutes from sunset (negative = before, positive = after). Defaults to `0` |
+
+### `speakers` array
+
+Each entry in `speakers` can be either a plain IP address string (legacy) or an object:
+
+| Field | Description |
+|-------|-------------|
+| `ip` | **Required.** IP address of the Sonos speaker. |
+| `name` | Optional friendly name (auto-populated from Sonos discovery during setup). |
+| `volume` | Optional per-speaker playback volume (0–100). Overrides the top-level `volume` for this speaker only. |
+
+**Per-speaker volume example:**
+
+```json
+"volume": 30,
+"speakers": [
+  { "ip": "10.0.40.32", "name": "Flag",          "volume": 50 },
+  { "ip": "10.0.40.41", "name": "Backyard Left",  "volume": 80 },
+  { "ip": "10.0.40.42", "name": "Backyard Right", "volume": 80 },
+  { "ip": "10.0.40.55", "name": "Office" }
+]
+```
+
+Volume resolution order for each speaker: **`speaker.volume`** → **top-level `volume`** → default **30**.
+
+The `Office` speaker above has no explicit `volume`, so it plays at the top-level `volume` (30 in this example).
+
+> **Legacy format still supported:** `"speakers": ["10.0.40.32", "10.0.40.41"]` (plain IP strings) continues to work and is automatically migrated to the object format the next time `setup.sh` is run.
 
 ### `schedules` array
 

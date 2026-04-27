@@ -3,10 +3,25 @@ config.py — Central configuration loader for the flag project.
 
 Defines install paths and provides load_config() for reading config.json.
 
-The ``speakers`` key in config.json must be a JSON array of one or more Sonos
-speaker IP address strings.  All listed speakers participate in every scheduled
-playback: they are temporarily grouped under the first IP (the coordinator),
-play the audio in sync, and then have their original state restored.
+The ``speakers`` key in config.json may be either:
+
+* **Legacy format** — a JSON array of IP address strings::
+
+      "speakers": ["10.0.40.32", "10.0.40.41"]
+
+* **New format** — a JSON array of objects with at minimum an ``"ip"`` field::
+
+      "speakers": [
+          {"ip": "10.0.40.32", "name": "Flag", "volume": 50},
+          {"ip": "10.0.40.41", "name": "Backyard Left", "volume": 80},
+          {"ip": "10.0.40.42", "name": "Backyard Right"}
+      ]
+
+In the new format each speaker may carry its own ``"volume"`` override; missing
+overrides fall back to the top-level ``"volume"`` key (default 30).  Both formats
+are accepted by :func:`load_config` and all downstream consumers.
+
+Use :func:`speaker_ips` to extract a plain list of IP strings from either format.
 """
 import json
 import logging
@@ -35,6 +50,22 @@ def get_port(cfg: dict) -> int:
         return 8000
 
 
+def speaker_ips(config: dict) -> list:
+    """
+    Return a list of IP address strings from the ``speakers`` config key.
+
+    Handles both the legacy string-array format and the new object format
+    transparently, so callers that only need IPs don't have to branch.
+
+    Args:
+        config (dict): Configuration dictionary returned by :func:`load_config`.
+
+    Returns:
+        list[str]: Ordered list of speaker IP addresses.
+    """
+    return [s["ip"] if isinstance(s, dict) else s for s in config.get("speakers", [])]
+
+
 def validate_config(cfg: dict) -> None:
     """
     Perform semantic validation of the configuration dictionary.
@@ -60,10 +91,26 @@ def validate_config(cfg: dict) -> None:
     elif not isinstance(speakers, list) or not speakers:
         _log.error("Config 'speakers' must be a non-empty list; got %r.", speakers)
     else:
-        for i, ip in enumerate(speakers):
-            if not isinstance(ip, str) or not ip.strip():
+        for i, spk in enumerate(speakers):
+            if isinstance(spk, dict):
+                ip = spk.get("ip", "")
+                if not isinstance(ip, str) or not ip.strip():
+                    _log.error(
+                        "Config 'speakers[%d].ip' must be a non-empty string; got %r.", i, ip
+                    )
+                vol = spk.get("volume")
+                if vol is not None and (not isinstance(vol, (int, float)) or not (0 <= vol <= 100)):
+                    _log.warning(
+                        "Config 'speakers[%d].volume' %r is invalid or outside 0–100.", i, vol
+                    )
+            elif isinstance(spk, str):
+                if not spk.strip():
+                    _log.error(
+                        "Config 'speakers[%d]' must be a non-empty string; got %r.", i, spk
+                    )
+            else:
                 _log.error(
-                    "Config 'speakers[%d]' must be a non-empty string; got %r.", i, ip
+                    "Config 'speakers[%d]' must be a string or object; got %r.", i, spk
                 )
 
     if "volume" not in cfg:

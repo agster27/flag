@@ -147,21 +147,42 @@ def main():
             "Please run setup.sh to reconfigure."
         )
 
-    volume = config.get("volume")
-    if volume is None or not isinstance(volume, (int, float)):
-        log("ERROR: 'volume' is missing or not a number in config.json. Aborting.")
+    # --- Global (default) volume ---
+    # May be absent when every speaker has its own volume; default to 30.
+    default_vol = config.get("volume", 30)
+    if not isinstance(default_vol, (int, float)):
+        log(f"WARNING: 'volume' value {default_vol!r} is not a number; using 30.")
+        default_vol = 30
+    default_vol = int(default_vol)
+    if not (0 <= default_vol <= 100):
+        clamped = max(0, min(100, default_vol))
+        log(f"WARNING: Volume {default_vol} is outside 0–100; clamping to {clamped}.")
+        print(f"  ⚠️  Volume {default_vol} is outside valid range 0–100; clamping to {clamped}.", file=sys.stderr)
+        default_vol = clamped
+
+    # --- Build per-speaker (ip, configured_volume) list ---
+    # Supports both legacy string format and new object format.
+    speaker_entries = []
+    for spk in speakers_cfg:
+        if isinstance(spk, dict):
+            ip = spk.get("ip", "")
+            raw_vol = spk.get("volume", default_vol)
+            try:
+                vol = max(0, min(100, int(raw_vol)))
+            except (TypeError, ValueError):
+                vol = default_vol
+        else:
+            ip = spk
+            vol = default_vol
+        if ip:
+            speaker_entries.append((str(ip), vol))
+
+    if not speaker_entries:
+        log("ERROR: 'speakers' contains no valid IP entries. Aborting.")
         sys.exit(
-            "❌ 'volume' is missing or not a number in config.json. "
+            "❌ 'speakers' contains no valid IP entries in config.json. "
             "Please run setup.sh to reconfigure."
         )
-
-    # --- Validate volume range ---
-    volume = int(volume)
-    if not (0 <= volume <= 100):
-        clamped = max(0, min(100, volume))
-        log(f"WARNING: Volume {volume} is outside 0–100; clamping to {clamped}.")
-        print(f"  ⚠️  Volume {volume} is outside valid range 0–100; clamping to {clamped}.", file=sys.stderr)
-        volume = clamped
 
     skip_restore_if_idle = config.get("skip_restore_if_idle", True)
     default_wait = config.get("default_wait_seconds", 60)
@@ -175,13 +196,16 @@ def main():
     # =========================================================================
     # Phase 0: Discovery & validation
     # =========================================================================
+    # spk_vol_map: speaker IP address -> configured playback volume
+    spk_vol_map = {}
     reachable = []
-    for ip in speakers_cfg:
+    for ip, vol in speaker_entries:
         try:
             sp = soco.SoCo(ip)
             sp.get_speaker_info(refresh=True)  # forces a network round-trip to the device; raises if the speaker is unreachable
             reachable.append(sp)
-            log(f"INFO: Connected to speaker at {ip} ({sp.player_name})")
+            spk_vol_map[ip] = vol
+            log(f"INFO: Connected to speaker at {ip} ({sp.player_name}) volume={vol}")
         except Exception as e:
             log(f"WARNING: Speaker at {ip} is unreachable: {e}. Skipping.")
             print(f"  ⚠️  Speaker at {ip} is unreachable — skipping.", file=sys.stderr)
@@ -253,11 +277,11 @@ def main():
         # =====================================================================
         # Phase 3: Form temporary bugle group
         # =====================================================================
-        bugle_coordinator.volume = volume
+        bugle_coordinator.volume = spk_vol_map.get(bugle_coordinator.ip_address, default_vol)
         for sp in reachable[1:]:
             try:
                 sp.join(bugle_coordinator)
-                sp.volume = volume
+                sp.volume = spk_vol_map.get(sp.ip_address, default_vol)
                 log(f"INFO: {sp.player_name} joined bugle group")
             except Exception as e:
                 log(f"WARNING: Could not add {sp.player_name} to bugle group: {e}")
