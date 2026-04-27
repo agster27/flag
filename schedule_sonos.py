@@ -427,8 +427,8 @@ def _build_boot_reschedule_service(schedule_names=None):
     Args:
         schedule_names (list[str] | None): Sanitised schedule names used to
             generate the ``Before=`` ordering constraint so that this service
-            completes before the named schedule timers can fire.  If ``None``
-            or empty, the ``Before=`` line is omitted.
+            completes before the named schedule timers can fire.  Both ``None``
+            and an empty list result in the ``Before=`` line being omitted.
 
     Returns:
         str: Unit file content ready to be written to disk.
@@ -442,7 +442,7 @@ def _build_boot_reschedule_service(schedule_names=None):
         "Description=Flag Audio — recompute sunset timers on boot\n"
         "After=network-online.target\n"
         "Wants=network-online.target\n"
-        f"{before_line}"
+        + before_line +
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
@@ -453,8 +453,6 @@ def _build_boot_reschedule_service(schedule_names=None):
         "[Install]\n"
         "WantedBy=multi-user.target\n"
     )
-
-
 
 
 def _run_systemctl(*args):
