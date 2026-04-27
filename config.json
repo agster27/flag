@@ -33,24 +33,19 @@
       "time": "sunset-5min"
     },
     {
-      "name": "evening-retreat",
-      "audio_url": "http://flag.aghy.home:8000/retreat.mp3",
-      "time": "sunset-1min"
-    },
-    {
       "name": "evening-colors",
       "audio_url": "http://flag.aghy.home:8000/evening_colors.mp3",
-      "time": "sunset+1min"
+      "time": "sunset-1min"
     },
     {
       "name": "evening-carry-on",
       "audio_url": "http://flag.aghy.home:8000/carry_on.mp3",
-      "time": "sunset+2min"
+      "time": "sunset+1min"
     },
     {
       "name": "taps",
       "audio_url": "http://flag.aghy.home:8000/taps.mp3",
-      "time": "22:00"
+      "time": "21:00"
     }
   ]
 }
