@@ -13,7 +13,7 @@
 📄 Log every playback to `/opt/flag/sonos_play.log`  
 📡 Serve your MP3s via a **tiny HTTP server**  
 ⚙️ Customize everything via `/opt/flag/config.json`  
-🖥️ Scheduled via **systemd timers** — better logging, auto-retry, and `Persistent=true` boot resilience (critical for Raspberry Pi)  
+🖥️ Scheduled via **systemd timers** — better logging, structured journald output, and explicit "missed plays are skipped, never replayed late" semantics  
 🎵 **Extensible schedules** — add any number of scheduled plays by editing `config.json`, no code changes needed  
 
 ---
@@ -139,6 +139,7 @@ After setup, your `/opt/flag/` folder should look like:
 flag-colors.service / flag-colors.timer       # Colors at 08:00
 flag-taps.service   / flag-taps.timer         # Taps at sunset (updated daily)
 flag-reschedule.service / flag-reschedule.timer  # Daily 02:00 — recalculates sunset
+flag-boot-reschedule.service                  # Oneshot on boot — recomputes sunset before timers fire
 flag-audio-http.service                       # HTTP audio file server
 ```
 
@@ -215,9 +216,6 @@ This means if Speaker A was playing Spotify before Colors, it will resume playin
 | `volume` | Default playback volume for the bugle call (0–100). Acts as the fallback when a speaker has no individual `volume`. Each speaker's original volume is restored afterward. |
 | `default_wait_seconds` | Fallback wait time (seconds) if MP3 duration cannot be determined |
 | `skip_restore_if_idle` | If `true`, do not restore prior playback when a speaker was idle before the bugle call |
-| `quiet_hours_start` | Hour (0–23) at which quiet hours begin (default: `22`, i.e. 22:00). See [Quiet hours](#-quiet-hours-guard). |
-| `quiet_hours_end` | Hour (0–23) at which quiet hours end (default: `7`, i.e. 07:00). See [Quiet hours](#-quiet-hours-guard). |
-| `allow_quiet_hours_play` | Set to `true` to bypass the quiet-hours guard for manual testing (default: `false`). |
 | `latitude` / `longitude` | Your coordinates, used to calculate local sunset time |
 | `timezone` | IANA timezone name (e.g. `"America/New_York"`) |
 | `sunset_offset_minutes` | Optional offset in minutes from sunset (negative = before, positive = after). Defaults to `0` |
@@ -264,45 +262,6 @@ Each entry in `schedules` defines one scheduled audio play:
 
 ---
 
-## 🔇 Quiet-hours guard
-
-`sonos_play.py` includes a **defence-in-depth quiet-hours guard** that refuses to play audio during a configurable night window, regardless of how the script was invoked (systemd, manual, etc.).
-
-### Why it exists
-
-`flag-colors.timer` uses `Persistent=true` so that a missed 08:00 fire (e.g. the Raspberry Pi was off) is replayed on the next boot. The nightly 02:00 reschedule run calls `systemctl restart flag-colors.timer` to refresh the `OnCalendar` value. Under certain failure modes — corrupted stamp file, NTP clock jump, or a prior-day non-zero exit — systemd may treat that restart as a "missed" event and fire the service immediately at 02:00, blasting bugle audio at full volume.
-
-The quiet-hours guard makes this physically impossible.
-
-### Behaviour
-
-- If the current local hour is inside the quiet window **and** `allow_quiet_hours_play` is `false` (the default):
-  - A `REFUSED:` message including the current hour, the quiet window, and the refused audio URL is written to the log.
-  - A user-facing message is printed to stderr.
-  - The script exits with code **0** (systemd does NOT mark the unit failed — refusal is intentional).
-- If `allow_quiet_hours_play` is `true`, an `INFO:` bypass message is logged and playback continues normally.
-
-### Window logic
-
-The window correctly handles both the **wrap-around** case (default 22→7, spanning midnight) and any non-wrap case (e.g. 1→5, within a single day).
-
-| Config | Window |
-|--------|--------|
-| `quiet_hours_start: 22`, `quiet_hours_end: 7` | 22:00 → 06:59 (spans midnight) |
-| `quiet_hours_start: 1`, `quiet_hours_end: 5` | 01:00 → 04:59 |
-
-### Config keys
-
-```json
-"quiet_hours_start": 22,
-"quiet_hours_end": 7,
-"allow_quiet_hours_play": false
-```
-
-Set `allow_quiet_hours_play` to `true` only for manual testing — remove or reset to `false` before leaving the system unattended.
-
----
-
 ## ➕ Adding a New Scheduled Play
 
 To add a new scheduled audio play (e.g., a 17:00 retreat call):
@@ -330,6 +289,14 @@ To add a new scheduled audio play (e.g., a 17:00 retreat call):
    ```bash
    systemctl list-timers --all | grep flag
    ```
+
+---
+
+## 🔄 Boot recovery
+
+When the LXC container starts (after a reboot, host outage, or migration), `flag-boot-reschedule.service` runs once to recompute today's sunset and rewrite the sunset timer's `OnCalendar` value. Combined with `Persistent=false` on all timers, this means: after any outage, schedules resume cleanly at their next correct fire time, and no missed play is ever replayed late.
+
+> **Missed plays are intentionally skipped, never replayed later.** If the container or host is down at the scheduled time, that play is simply missed — there is no catch-up audio at an unexpected hour.
 
 ---
 
@@ -422,7 +389,7 @@ cat /opt/flag/setup.log
   The `flag-reschedule` timer recalculates sunset at 02:00 each night. To recalculate immediately:  
   `sudo /opt/flag/sonos-env/bin/python /opt/flag/schedule_sonos.py`
 - **Why doesn't the reschedule restart the sunset timer?**  
-  By design, the nightly 02:00 reschedule run stops sunset timers (e.g. `flag-taps.timer`) before rewriting their unit files, then leaves them stopped after `daemon-reload`. Starting (or restarting) a sunset timer at 02:00 causes systemd to invoke the associated service immediately at 02:00 — an unwanted early-morning audio play. The updated `OnCalendar` line is already written to disk and loaded by `daemon-reload`; systemd will activate the timer at the correct sunset time without an explicit `systemctl start`. If you ever need to immediately activate the sunset timer manually, run:  
+  By design, the nightly 02:00 reschedule run rewrites the sunset timer's unit file and leaves the timer active across the rewrite. systemd re-reads the updated `OnCalendar` line on `daemon-reload` and re-arms the already-active timer — no explicit `start` or `restart` is needed or safe to use. Starting (or restarting) a sunset timer causes systemd to invoke the associated service immediately — an unwanted audio play. If you ever need to immediately activate the sunset timer manually, run:  
   `sudo systemctl start flag-taps.timer`
 - **A speaker is not found or unreachable?**  
   `sonos_play.py` logs a warning and skips the unreachable speaker — the remaining reachable speakers continue with synchronized playback. If **all** configured speakers are unreachable, the script exits with a non-zero code (so systemd marks the unit as failed). Check `/opt/flag/sonos_play.log` for `WARNING: Speaker at <IP> is unreachable` messages.

@@ -1633,8 +1633,8 @@ function upgrade_scripts() {
     # Build the set of expected flag-<name>.timer / flag-<name>.service units
     # from config.json schedules (requires jq, which is a system dependency).
     if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
-        local _expected_timers=()
-        local _expected_services=("flag-audio-http.service")
+        local _expected_timers=("flag-reschedule.timer")
+        local _expected_services=("flag-audio-http.service" "flag-reschedule.service" "flag-boot-reschedule.service")
         while IFS= read -r _sched_name; do
             [ -n "$_sched_name" ] || continue
             _expected_timers+=("flag-${_sched_name}.timer")
