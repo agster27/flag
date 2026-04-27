@@ -85,7 +85,7 @@ def parse_sunset_offset(time_str: str):
     if not m:
         return None
     sign, mins = m.group(1), int(m.group(2))
-    if mins == 0 or mins > 720:
+    if mins < 1 or mins > 720:
         raise ValueError(
             f"Sunset offset out of range: '{time_str}' (must be 1-720 minutes)"
         )
@@ -847,8 +847,8 @@ def main():
             except (ValueError, AttributeError):
                 print(
                     f"  ⚠️  Skipping '{name}': invalid time format '{time_str}' "
-                    "(expected HH:MM (00–23 / 00–59), 'sunset', or 'sunset±Nmin' "
-                    "(e.g. 'sunset-5min'))"
+                    "(expected HH:MM with hour 0–23 and minute 0–59, 'sunset', or "
+                    "'sunset±Nmin' (e.g. 'sunset-5min'))"
                 )
                 _log.warning(
                     "Skipping '%s': invalid time format '%s'", name, time_str,

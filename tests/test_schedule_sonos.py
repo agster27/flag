@@ -461,8 +461,12 @@ class TestParseSunsetOffset(unittest.TestCase):
         self.assertEqual(self.parse("sunset-5min"), -5)
 
     def test_positive_offset(self):
-        """'sunset+1min' returns 1."""
+        """'sunset+1min' returns 1 (also validates the minimum accepted value)."""
         self.assertEqual(self.parse("sunset+1min"), 1)
+
+    def test_min_negative_offset(self):
+        """'sunset-1min' returns -1 (minimum accepted negative offset)."""
+        self.assertEqual(self.parse("sunset-1min"), -1)
 
     def test_max_offset(self):
         """'sunset+720min' returns 720 (upper boundary)."""
