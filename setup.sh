@@ -8,7 +8,7 @@
 set -e
 set -o pipefail
 
-SETUP_VERSION="2.1.1"
+SETUP_VERSION="2.2.0"
 
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"
@@ -17,6 +17,13 @@ VENV_DIR="$INSTALL_DIR/sonos-env"
 LOG_FILE="$INSTALL_DIR/setup.log"
 REQUIREMENTS_TXT="$INSTALL_DIR/requirements.txt"
 CONFIG_FILE="$INSTALL_DIR/config.json"
+
+# Session-level cache for Sonos speaker name lookups (IP → player_name).
+# Populated by _resolve_speaker_names; persists for the lifetime of this
+# setup.sh invocation so repeated menu renders don't re-query the network.
+# The '2>/dev/null || true' guard makes this a no-op on bash < 4.0 that
+# lacks associative array support — the feature degrades to bare IPs.
+declare -A _SPEAKER_NAME_CACHE 2>/dev/null || true
 
 function maybe_sudo() {
     if [ "$(id -u)" -eq 0 ]; then
@@ -78,14 +85,17 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Auto-discover Sonos speakers on the local network via soco/SSDP.
-# Sets SONOS_IP to the chosen/found IP, or empty string if none selected.
-# Used by the "Test Sonos Playback" menu option (single-speaker selection for quick testing).
+# Multi-select speaker picker for test playback.
+# Sets SONOS_IPS_JSON to a JSON array of selected IPs, or empty array when
+# falling through to manual entry.
+# Sets _USE_CONFIG_FILE_DIRECTLY=true if the user picks option 0.
 # Requires the Python venv (with soco installed) to already exist.
 # ---------------------------------------------------------------------------
-function _pick_single_speaker() {
+function _pick_speakers_for_test() {
+    SONOS_IPS_JSON="[]"
+    _USE_CONFIG_FILE_DIRECTLY=false
+
     if [ ! -d "$VENV_DIR" ]; then
-        SONOS_IP=""
         return
     fi
     log "🔍 Scanning network for Sonos speakers..."
@@ -111,41 +121,60 @@ PYEOF
             echo "  ⚠️  No Sonos speakers found on the network."
             echo "  You can enter the IP address manually."
         fi
-        SONOS_IP=""
         return
     fi
 
     echo ""
     echo "  Found Sonos speakers:"
+    echo "    0) Use all currently configured speakers from config.json"
     i=1
-    declare -a IPS
-    # IPS is 1-indexed intentionally: IPS[$i] maps directly to the user's "Select N" input
+    declare -a _TEST_IPS
+    # _TEST_IPS is 1-indexed: _TEST_IPS[$i] maps to the user's "Select N" input
     while IFS=$'\t' read -r name ip; do
         echo "    $i) $name — $ip"
-        IPS[$i]="$ip"
+        _TEST_IPS[$i]="$ip"
         ((i++))
     done <<< "$DISCOVERED"
     echo ""
 
     COUNT=$((i - 1))
-    if [ "$COUNT" -eq 1 ]; then
-        SONOS_IP="${IPS[1]}"
-        echo "  ✅ Only one speaker found. Using: $SONOS_IP"
-        return
-    fi
-
+    echo "  Enter the numbers of the speakers to test (comma-separated, e.g. 1,3)."
+    echo "  Enter 0 for all configured speakers, press Enter for all discovered, or type IPs manually."
     while true; do
-        read -rp "  Select speaker [1-${COUNT}] or press Enter to enter IP manually: " SEL
+        read -rp "  Selection [0, 1-${COUNT}, comma-separated, or Enter for all discovered]: " SEL
         if [ -z "$SEL" ]; then
-            SONOS_IP=""
+            # Select all discovered speakers
+            SONOS_IPS_JSON="[]"
+            for (( j=1; j<=COUNT; j++ )); do
+                SONOS_IPS_JSON=$(echo "$SONOS_IPS_JSON" | jq --arg ip "${_TEST_IPS[$j]}" '. + [$ip]')
+            done
+            echo "  ✅ Selected all $COUNT discovered speaker(s)."
             return
         fi
-        if [[ "$SEL" =~ ^[0-9]+$ ]] && [ "$SEL" -ge 1 ] && [ "$SEL" -le "$COUNT" ]; then
-            SONOS_IP="${IPS[$SEL]}"
-            echo "  ✅ Selected: $SONOS_IP"
+        if [ "$SEL" = "0" ]; then
+            _USE_CONFIG_FILE_DIRECTLY=true
+            echo "  ✅ Will use all configured speakers from config.json."
             return
         fi
-        echo "  ⚠️  Please enter a number between 1 and $COUNT, or press Enter to type manually."
+        # Validate and parse comma-separated selection
+        local _valid=true
+        local _selected_json="[]"
+        IFS=',' read -ra _parts <<< "$SEL"
+        for _part in "${_parts[@]}"; do
+            _n="${_part// /}"  # strip spaces
+            if [[ "$_n" =~ ^[0-9]+$ ]] && [ "$_n" -ge 1 ] && [ "$_n" -le "$COUNT" ]; then
+                _selected_json=$(echo "$_selected_json" | jq --arg ip "${_TEST_IPS[$_n]}" '. + [$ip]')
+            else
+                echo "  ⚠️  Invalid selection: '$_n'. Enter 0, or numbers between 1 and $COUNT."
+                _valid=false
+                break
+            fi
+        done
+        if [ "$_valid" = "true" ]; then
+            SONOS_IPS_JSON="$_selected_json"
+            echo "  ✅ Selected $(echo "$SONOS_IPS_JSON" | jq 'length') speaker(s)."
+            return
+        fi
     done
 }
 
@@ -184,8 +213,17 @@ PYEOF
     echo "  Found Sonos speakers:"
     i=1
     declare -a DISC_IPS
+    # Read existing configured IPs for annotation
+    _existing_cfg_ips=""
+    if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
+        _existing_cfg_ips=$(jq -r '.speakers // [] | .[]' "$CONFIG_FILE" 2>/dev/null) || true
+    fi
     while IFS=$'\t' read -r name ip; do
-        echo "    $i) $name — $ip"
+        _marker=""
+        if [ -n "$_existing_cfg_ips" ] && echo "$_existing_cfg_ips" | grep -qx "$ip" 2>/dev/null; then
+            _marker="  [currently configured]"
+        fi
+        echo "    $i) $name — $ip${_marker}"
         DISC_IPS[$i]="$ip"
         ((i++))
     done <<< "$DISCOVERED"
@@ -701,26 +739,58 @@ function test_sonos_playback() {
         return
     fi
 
-    _pick_single_speaker
+    _pick_speakers_for_test
 
-    if [ -z "$SONOS_IP" ]; then
-        # Fall back to first speaker from config
-        if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
-            SONOS_IP=$(jq -r '.speakers[0] // ""' "$CONFIG_FILE" 2>/dev/null)
+    # Option 0: run directly against the full config file (no temp-config rewrite)
+    if [ "$_USE_CONFIG_FILE_DIRECTLY" = "true" ]; then
+        TEST_URL=$(jq -r '(.schedules[0].audio_url // "")' "$CONFIG_FILE")
+        _cfg_speakers=$(jq -r '.speakers // [] | join(", ")' "$CONFIG_FILE" 2>/dev/null || echo "configured")
+        echo ""
+        echo "  🔊 Playing test sound on configured speaker(s): $_cfg_speakers ..."
+        echo "     URL: $TEST_URL"
+        echo ""
+        echo "  ⏳ This may take 30–90 seconds. Watch progress:"
+        echo "     tail -f $LOG_FILE"
+        echo ""
+        FLAG_CONFIG="$CONFIG_FILE" "$VENV_DIR/bin/python" "$INSTALL_DIR/sonos_play.py" "$TEST_URL"
+        PLAY_EXIT=$?
+        if [ $PLAY_EXIT -eq 0 ]; then
+            echo "  ✅ Test playback complete."
+        else
+            echo "  ❌ Test playback failed. Check $LOG_FILE for details."
         fi
+        echo "  📋 Full log: $LOG_FILE"
+        return
     fi
-    if [ -z "$SONOS_IP" ]; then
-        read -rp "  Enter Sonos speaker IP to test: " SONOS_IP
+
+    # No speakers selected from discovery — fall back to manual entry
+    if [ "$(echo "$SONOS_IPS_JSON" | jq 'length')" -eq 0 ]; then
+        read -rp "  Enter Sonos speaker IP(s), comma-separated, to test: " _MANUAL_IPS
+        if [ -z "$_MANUAL_IPS" ]; then
+            echo "  ⚠️  No IP provided. Aborting test."
+            return
+        fi
+        SONOS_IPS_JSON="[]"
+        IFS=',' read -ra _ips <<< "$_MANUAL_IPS"
+        for _ip in "${_ips[@]}"; do
+            _ip="${_ip// /}"
+            if [ -n "$_ip" ]; then
+                SONOS_IPS_JSON=$(echo "$SONOS_IPS_JSON" | jq --arg ip "$_ip" '. + [$ip]')
+            fi
+        done
     fi
-    if [ -z "$SONOS_IP" ]; then
+
+    if [ "$(echo "$SONOS_IPS_JSON" | jq 'length')" -eq 0 ]; then
         echo "  ⚠️  No IP provided. Aborting test."
         return
     fi
 
     # Use the first schedule's audio_url
     TEST_URL=$(jq -r '(.schedules[0].audio_url // "")' "$CONFIG_FILE")
+    _test_ips_display=$(echo "$SONOS_IPS_JSON" | jq -r 'join(", ")')
+    _test_count=$(echo "$SONOS_IPS_JSON" | jq 'length')
     echo ""
-    echo "  🔊 Playing test sound on $SONOS_IP ..."
+    echo "  🔊 Playing test sound on $_test_count speaker(s): $_test_ips_display ..."
     echo "     URL: $TEST_URL"
     echo ""
     echo "  ⏳ This may take 30–90 seconds. Watch progress:"
@@ -728,7 +798,7 @@ function test_sonos_playback() {
     echo ""
 
     TMPCONFIG=$(mktemp --suffix=.json) || { echo "  ❌ Failed to create temp file."; return 1; }
-    if ! jq --argjson speakers "[\"$SONOS_IP\"]" '.speakers = $speakers' "$CONFIG_FILE" > "$TMPCONFIG"; then
+    if ! jq --argjson speakers "$SONOS_IPS_JSON" '.speakers = $speakers' "$CONFIG_FILE" > "$TMPCONFIG"; then
         rm -f "$TMPCONFIG"
         echo "  ❌ Failed to build test config. Check $CONFIG_FILE."
         return 1
@@ -860,6 +930,81 @@ function detect_install_state() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Attempt to resolve Sonos speaker IPs to player names via soco.
+# Results are cached in the _SPEAKER_NAME_CACHE associative array for the
+# current setup.sh session so repeated menu renders don't re-query the network.
+# Sets _RESOLVED_SPEAKERS_DISPLAY to a formatted display string (e.g.
+# "Living Room (10.0.40.32), Kitchen (10.0.40.41)").
+# Falls back to bare IPs when lookup fails or the venv is absent.
+# ---------------------------------------------------------------------------
+function _resolve_speaker_names() {
+    local _cfg="$1"
+    _RESOLVED_SPEAKERS_DISPLAY=""
+    if ! command -v jq &>/dev/null || [ ! -f "$_cfg" ]; then
+        return
+    fi
+
+    local _raw_ips
+    _raw_ips=$(jq -r '.speakers // [] | .[]' "$_cfg" 2>/dev/null) || true
+    if [ -z "$_raw_ips" ]; then
+        return
+    fi
+
+    # Collect IPs not yet in the session cache
+    local _needs_lookup=()
+    while IFS= read -r _ip; do
+        if [[ -z "${_SPEAKER_NAME_CACHE[$_ip]+x}" ]]; then
+            _needs_lookup+=("$_ip")
+        fi
+    done <<< "$_raw_ips"
+
+    # Batch soco lookup with a short timeout so the menu is never blocked
+    if [ "${#_needs_lookup[@]}" -gt 0 ] && [ -d "$VENV_DIR" ] && [ -x "$VENV_DIR/bin/python" ]; then
+        local _ips_json
+        _ips_json=$(printf '%s\n' "${_needs_lookup[@]}" | jq -Rs '[split("\n")[] | select(. != "")]')
+        local _lookup_result
+        _lookup_result=$(IPS_JSON="$_ips_json" timeout 3 "$VENV_DIR/bin/python" - <<'PYEOF' 2>/dev/null || true
+import sys, json, os
+try:
+    from soco.discovery import discover
+    ips = json.loads(os.environ.get('IPS_JSON', '[]'))
+    devices = {d.ip_address: d.player_name for d in (discover(timeout=2) or [])}
+    for ip in ips:
+        name = devices.get(ip, "")
+        print(f"{ip}\t{name}")
+except Exception:
+    pass
+PYEOF
+)
+        if [ -n "$_lookup_result" ]; then
+            while IFS=$'\t' read -r _lip _lname; do
+                _SPEAKER_NAME_CACHE["$_lip"]="$_lname"
+            done <<< "$_lookup_result"
+        fi
+        # Mark any still-uncached IPs so we don't retry on the next render
+        for _ip in "${_needs_lookup[@]}"; do
+            if [[ -z "${_SPEAKER_NAME_CACHE[$_ip]+x}" ]]; then
+                _SPEAKER_NAME_CACHE["$_ip"]=""
+            fi
+        done
+    fi
+
+    # Build display string from cache (or bare IPs where name is unknown)
+    local _parts=()
+    while IFS= read -r _ip; do
+        local _name="${_SPEAKER_NAME_CACHE[$_ip]:-}"
+        if [ -n "$_name" ]; then
+            _parts+=("$_name ($_ip)")
+        else
+            _parts+=("$_ip")
+        fi
+    done <<< "$_raw_ips"
+
+    local IFS=', '
+    _RESOLVED_SPEAKERS_DISPLAY="${_parts[*]}"
+}
+
 function prompt_menu() {
     echo ""
     echo "============================================"
@@ -873,9 +1018,20 @@ function prompt_menu() {
     fi
 
     if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
-        _speakers=$(jq -r '.speakers // [] | join(", ")' "$CONFIG_FILE" 2>/dev/null || echo "not set")
+        _speaker_count=$(jq '.speakers | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
+        _resolve_speaker_names "$CONFIG_FILE"
+        _speakers_display="$_RESOLVED_SPEAKERS_DISPLAY"
         _cnt=$(jq '.schedules | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
-        echo "  Config:  Speakers: $_speakers | $_cnt schedule(s)"
+        if [ "$_speaker_count" -eq 0 ]; then
+            echo "  Config:  Speakers: (none) | $_cnt schedule(s)"
+        elif [ "$_speaker_count" -le 3 ]; then
+            echo "  Config:  Speakers ($_speaker_count): $_speakers_display"
+            echo "           Schedules: $_cnt"
+        else
+            echo "  Config:  Speakers: $_speaker_count configured"
+            echo "           ($_speakers_display)"
+            echo "           Schedules: $_cnt"
+        fi
     fi
 
     get_sunset_header_line || true
