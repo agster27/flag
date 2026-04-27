@@ -54,6 +54,12 @@ other speakers to coordinate with.
 # SCENARIO 8: Volume correctness
 #   [ ] Bugle plays at configured volume on every speaker.
 #   [ ] Each speaker's original volume is restored after playback.
+#
+# SCENARIO 9: Quiet-hours guard
+#   [ ] At 22:00–06:59, sonos_play.py exits 0 without playing and logs REFUSED:.
+#   [ ] At 07:00–21:59, playback proceeds normally.
+#   [ ] With allow_quiet_hours_play: true, playback proceeds even in quiet hours.
+#   [ ] Bad quiet_hours_start/end values fall back to defaults (22/7) with a WARNING.
 # =============================================================================
 import argparse
 import os
@@ -192,6 +198,67 @@ def main():
     if not audio_url.startswith("http://") and not audio_url.startswith("https://"):
         log(f"ERROR: audio_url '{audio_url}' is not a valid HTTP URL. Aborting.")
         sys.exit(f"❌ audio_url must start with http:// or https://. Got: {audio_url!r}")
+
+    # =========================================================================
+    # Quiet-hours guard (defense-in-depth against Persistent=true catch-up fires)
+    #
+    # flag-colors.timer uses Persistent=true so that a missed 08:00 fire is
+    # replayed after a boot.  The nightly 02:00 reschedule run calls
+    # `systemctl restart flag-colors.timer` to keep the OnCalendar value fresh.
+    # Under edge-case failure modes (corrupted stamp file, NTP clock jump, or a
+    # prior-day non-zero exit) systemd may treat that restart as a "missed" fire
+    # and invoke the service immediately — blasting audio at high volume in the
+    # middle of the night.
+    #
+    # This guard makes an unintended 2am play physically impossible regardless
+    # of any systemd timer misbehavior.  Refusal is intentional, not an error:
+    # we exit 0 so systemd does NOT mark the unit as failed.
+    # =========================================================================
+    quiet_start = config.get("quiet_hours_start", 22)
+    quiet_end = config.get("quiet_hours_end", 7)
+    allow_quiet = config.get("allow_quiet_hours_play", False)
+
+    # Validate quiet hours config values; fall back to defaults on bad input.
+    if not isinstance(quiet_start, int) or not (0 <= quiet_start <= 23):
+        log(
+            f"WARNING: 'quiet_hours_start' value {quiet_start!r} is not an int "
+            f"in 0–23; using default 22."
+        )
+        quiet_start = 22
+    if not isinstance(quiet_end, int) or not (0 <= quiet_end <= 23):
+        log(
+            f"WARNING: 'quiet_hours_end' value {quiet_end!r} is not an int "
+            f"in 0–23; using default 7."
+        )
+        quiet_end = 7
+
+    # Capture the current time once so the same instant is used for both the
+    # quiet-hours check and all log/print messages in this guard block.
+    _now = datetime.now()
+    now_hour = _now.hour
+    # Handle both wrap-around window (e.g. 22→7 spans midnight, start > end)
+    # and non-wrap window (e.g. 1→5 within a single day, start < end).
+    if quiet_start > quiet_end:
+        in_quiet = now_hour >= quiet_start or now_hour < quiet_end
+    else:
+        in_quiet = quiet_start <= now_hour < quiet_end
+
+    if in_quiet and not allow_quiet:
+        log(
+            f"REFUSED: Current hour {now_hour:02d}:xx is inside quiet hours "
+            f"({quiet_start:02d}:00–{quiet_end:02d}:00). Refusing to play {audio_url}."
+        )
+        print(
+            f"  🔇 Quiet hours ({quiet_start:02d}:00–{quiet_end:02d}:00): playback refused "
+            f"at {now_hour:02d}:xx. Set 'allow_quiet_hours_play': true to override.",
+            file=sys.stderr,
+        )
+        sys.exit(0)
+    elif allow_quiet and in_quiet:
+        log(
+            f"INFO: 'allow_quiet_hours_play' is set — bypassing quiet hours "
+            f"({quiet_start:02d}:00–{quiet_end:02d}:00) at hour {now_hour:02d}."
+        )
 
     # =========================================================================
     # Phase 0: Discovery & validation

@@ -250,6 +250,29 @@ def resolve_schedules(config):
 # Systemd unit file builders
 # ---------------------------------------------------------------------------
 
+def _unit_file_content_matches(path: str, new_content: str) -> bool:
+    """
+    Return True if the file at *path* exists and its contents exactly equal *new_content*.
+
+    Used as a guard before calling :func:`_write_unit_file` to avoid unnecessary
+    writes (and downstream ``systemctl restart`` calls) when the unit file content
+    has not changed.
+
+    Args:
+        path (str): Absolute path to the unit file.
+        new_content (str): The new content to compare against.
+
+    Returns:
+        bool: ``True`` if the file exists and its contents are identical to
+        *new_content*; ``False`` if the file is absent or differs in any way.
+    """
+    try:
+        with open(path) as f:
+            return f.read() == new_content
+    except OSError:
+        return False
+
+
 def _write_unit_file(path, content):
     """
     Atomically write *content* to a systemd unit file at *path*.
@@ -506,7 +529,11 @@ def _clean_stale_units(current_names):
     Args:
         current_names (set[str]): Set of sanitised schedule names that should
             remain active (e.g. ``{"colors", "taps"}``).
+
+    Returns:
+        bool: ``True`` if at least one stale unit file was removed.
     """
+    removed_any = False
     for suffix in (".timer", ".service"):
         pattern = os.path.join(SYSTEMD_DIR, f"flag-*{suffix}")
         for unit_path in _glob.glob(pattern):
@@ -525,9 +552,11 @@ def _clean_stale_units(current_names):
                 )
                 try:
                     os.remove(unit_path)
+                    removed_any = True
                     print(f"  🗑️  Removed stale unit: {unit_file}")
                 except OSError as exc:
                     print(f"  ⚠️  Could not remove {unit_path}: {exc}")
+    return removed_any
 
 
 # ---------------------------------------------------------------------------
@@ -653,6 +682,12 @@ def main():
 
     # --- Generate a service + timer pair for each schedule entry ---
     written_names: set[str] = set()
+    # changed_units: schedule names whose unit files actually differed from disk.
+    # Only these timers will be restarted in the reschedule branch.
+    changed_units: set[str] = set()
+    # any_file_written: True if any unit file was actually written this run.
+    # Used to decide whether daemon-reload is needed.
+    any_file_written: bool = False
     # Maps schedule name → (hour, minute) for sunset-based timers so that the
     # activation step can compare against the current time.
     sunset_times: dict[str, tuple[int, int]] = {}
@@ -703,12 +738,23 @@ def main():
         service_path = os.path.join(SYSTEMD_DIR, f"flag-{name}.service")
         timer_path = os.path.join(SYSTEMD_DIR, f"flag-{name}.timer")
 
+        service_content = _build_service_unit(name, audio_url)
         timer_content = _build_timer_unit(name, hour, minute, persistent=(time_str != "sunset"))
 
-        # Atomic writes — if either raises, the exception propagates to the caller
-        _write_unit_file(service_path, _build_service_unit(name, audio_url))
-        _write_unit_file(timer_path, timer_content)
-        _log.debug("Wrote timer unit %s:\n%s", timer_path, timer_content.rstrip())
+        # Only write unit files when content has actually changed to avoid
+        # unnecessary daemon-reload cycles and spurious Persistent=true catch-up fires.
+        unit_changed = False
+        if not _unit_file_content_matches(service_path, service_content):
+            _write_unit_file(service_path, service_content)
+            unit_changed = True
+            any_file_written = True
+        if not _unit_file_content_matches(timer_path, timer_content):
+            _write_unit_file(timer_path, timer_content)
+            _log.debug("Wrote timer unit %s:\n%s", timer_path, timer_content.rstrip())
+            unit_changed = True
+            any_file_written = True
+        if unit_changed:
+            changed_units.add(name)
 
         written_names.add(name)
         if time_str == "sunset":
@@ -723,36 +769,45 @@ def main():
         )
 
     # --- Write the daily reschedule service/timer pair ---
-    _write_unit_file(
-        os.path.join(SYSTEMD_DIR, "flag-reschedule.service"),
-        _build_reschedule_service(),
-    )
-    _write_unit_file(
-        os.path.join(SYSTEMD_DIR, "flag-reschedule.timer"),
-        _build_reschedule_timer(),
-    )
+    reschedule_svc_content = _build_reschedule_service()
+    reschedule_timer_content = _build_reschedule_timer()
+    reschedule_svc_path = os.path.join(SYSTEMD_DIR, "flag-reschedule.service")
+    reschedule_timer_path = os.path.join(SYSTEMD_DIR, "flag-reschedule.timer")
+    if not _unit_file_content_matches(reschedule_svc_path, reschedule_svc_content):
+        _write_unit_file(reschedule_svc_path, reschedule_svc_content)
+        any_file_written = True
+    if not _unit_file_content_matches(reschedule_timer_path, reschedule_timer_content):
+        _write_unit_file(reschedule_timer_path, reschedule_timer_content)
+        any_file_written = True
     print(
         "  ✅ Reschedule: daily timer at 02:00 local time "
         "(flag-reschedule.timer → flag-reschedule.service)"
     )
 
     # --- Remove stale unit files from previous runs ---
-    _clean_stale_units(written_names)
+    stale_removed = _clean_stale_units(written_names)
 
     # --- Reload systemd daemon so it picks up the new/changed unit files ---
-    # All unit files must be written before daemon-reload and enable steps.
-    _log.info("Running daemon-reload")
-    try:
-        _run_systemctl("daemon-reload")
-    except RuntimeError as exc:
-        print(f"\n  ❌ daemon-reload failed — check unit file syntax:\n  {exc}")
-        _log.error("daemon-reload failed: %s", exc)
-        sys.exit(1)
+    # Only reload when at least one unit file was actually written or a stale
+    # unit was removed; skipping daemon-reload when nothing changed prevents
+    # systemd from unnecessarily clearing timer timestamps.
+    if any_file_written or stale_removed:
+        _log.info("Running daemon-reload")
+        try:
+            _run_systemctl("daemon-reload")
+        except RuntimeError as exc:
+            print(f"\n  ❌ daemon-reload failed — check unit file syntax:\n  {exc}")
+            _log.error("daemon-reload failed: %s", exc)
+            sys.exit(1)
+    else:
+        _log.info("Skipping daemon-reload: no unit files changed and no stale units removed")
 
     # --- Activate timers ---
     if is_reschedule:
-        # Reschedule run: restart fixed-time timers normally and skip sunset
-        # timers entirely.
+        # Reschedule run: restart fixed-time timers only when their unit file
+        # actually changed.  Skipping the restart when content is unchanged
+        # prevents Persistent=true catch-up fires at 02:00 — if the stamp is
+        # still valid there is no reason to reset it with a restart.
         #
         # Sunset timers are left active across the unit-file rewrite.  systemd
         # re-reads the updated unit file on daemon-reload and re-arms an
@@ -771,26 +826,37 @@ def main():
                 # Sunset timer: already-active timer re-armed by daemon-reload.
                 # Do NOT stop/start — that would cause spurious immediate fire.
                 sun_hour, sun_minute = sunset_times[name]
-                _log.info(
-                    "  ✅ %s: unit updated (OnCalendar=%02d:%02d); "
-                    "already-active timer re-armed by daemon-reload",
-                    timer_name, sun_hour, sun_minute,
-                )
-                print(
-                    f"  ✅ {timer_name}: unit updated (OnCalendar={sun_hour:02d}:{sun_minute:02d}); "
-                    f"already-active timer re-armed by daemon-reload"
-                )
+                if name in changed_units:
+                    _log.info(
+                        "  ✅ %s: unit updated (OnCalendar=%02d:%02d); "
+                        "already-active timer re-armed by daemon-reload",
+                        timer_name, sun_hour, sun_minute,
+                    )
+                    print(
+                        f"  ✅ {timer_name}: unit updated (OnCalendar={sun_hour:02d}:{sun_minute:02d}); "
+                        f"already-active timer re-armed by daemon-reload"
+                    )
+                else:
+                    _log.info("  %s: unchanged, no action needed", timer_name)
+                    print(f"  ✅ {timer_name}: unchanged, no action needed")
             else:
-                # Fixed-time timer: safe to restart because OnCalendar (e.g.
-                # 08:00) has not yet elapsed at the 02:00 reschedule time.
-                _log.info("Restarting %s (fixed-time timer)", timer_name)
-                try:
-                    _run_systemctl("restart", timer_name)
-                    print(f"  ✅ Restarted (already enabled): {timer_name}")
-                    _log.info("Restarted %s successfully", timer_name)
-                except RuntimeError as exc:
-                    print(f"  ⚠️  Could not restart {timer_name}: {exc}")
-                    _log.error("Could not restart %s: %s", timer_name, exc)
+                # Fixed-time timer: safe to restart when OnCalendar (e.g. 08:00)
+                # has not yet elapsed at the 02:00 reschedule time, BUT only
+                # restart if the unit file actually changed.  An unchanged unit
+                # file means the stamp is still valid — restarting would clear
+                # it and could trigger a Persistent=true catch-up fire.
+                if name in changed_units:
+                    _log.info("Restarting %s (fixed-time timer)", timer_name)
+                    try:
+                        _run_systemctl("restart", timer_name)
+                        print(f"  ✅ Restarted (already enabled): {timer_name}")
+                        _log.info("Restarted %s successfully", timer_name)
+                    except RuntimeError as exc:
+                        print(f"  ⚠️  Could not restart {timer_name}: {exc}")
+                        _log.error("Could not restart %s: %s", timer_name, exc)
+                else:
+                    _log.info("%s: unit file unchanged, skipping restart", timer_name)
+                    print(f"  ✅ {timer_name}: unit file unchanged, skipping restart")
 
         # Skip flag-reschedule.timer — it is hardcoded to 02:00 and never
         # changes, so there is nothing to update.  More importantly, restarting

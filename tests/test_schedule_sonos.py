@@ -199,5 +199,88 @@ class TestFirstInstallRun(unittest.TestCase):
                       "Expected 'systemctl daemon-reload'")
 
 
+# ---------------------------------------------------------------------------
+# P1 optimisation tests: skip no-op restarts when unit files unchanged
+# ---------------------------------------------------------------------------
+
+class TestRescheduleOptimization(unittest.TestCase):
+    """
+    Verify that the reschedule run skips ``systemctl restart`` when the timer
+    unit file content has not changed (P1 defence-in-depth fix).
+    """
+
+    def _run_reschedule(self, unit_file_matches):
+        """
+        Run schedule_sonos.main() in reschedule mode.
+
+        Args:
+            unit_file_matches (bool): Return value for
+                ``_unit_file_content_matches``.  True → files are unchanged →
+                no restart.  False → files differ → restart required.
+
+        Returns:
+            list of _run_systemctl call arg-tuples.
+        """
+        import schedule_sonos
+
+        with patch("os.getuid", return_value=0), \
+             patch("schedule_sonos.load_config", return_value=_base_config()), \
+             patch("schedule_sonos._write_unit_file"), \
+             patch("schedule_sonos._clean_stale_units", return_value=False), \
+             patch("schedule_sonos.get_sunset_local_time", return_value=(19, 39)), \
+             patch("schedule_sonos._is_timer_enabled", return_value=True), \
+             patch("schedule_sonos._unit_file_content_matches",
+                   return_value=unit_file_matches), \
+             patch("schedule_sonos._run_systemctl") as mock_ctl:
+            schedule_sonos.main()
+        return _systemctl_calls(mock_ctl)
+
+    def test_reschedule_no_restart_when_unchanged(self):
+        """
+        When the on-disk unit file already matches the newly computed content,
+        ``systemctl restart flag-colors.timer`` must NOT be called.
+
+        This is the core guard: the 02:00 reschedule run must not restart a
+        Persistent=true timer when nothing changed, to prevent spurious
+        catch-up fires.
+        """
+        calls = self._run_reschedule(unit_file_matches=True)
+        restart_colors = [c for c in calls if c == ("restart", "flag-colors.timer")]
+        self.assertEqual(restart_colors, [],
+                         "Expected NO 'systemctl restart flag-colors.timer' "
+                         "when unit file content is unchanged")
+
+    def test_reschedule_restarts_when_changed(self):
+        """
+        When the unit file content differs from what is on disk (e.g. the
+        colors time changed from 08:00 to 09:00), ``systemctl restart
+        flag-colors.timer`` must be called exactly once.
+        """
+        calls = self._run_reschedule(unit_file_matches=False)
+        restart_colors = [c for c in calls if c == ("restart", "flag-colors.timer")]
+        self.assertEqual(len(restart_colors), 1,
+                         "Expected exactly one 'systemctl restart flag-colors.timer' "
+                         "when unit file content changed")
+
+    def test_reschedule_never_restarts_reschedule_timer(self):
+        """
+        Regression guard: ``systemctl restart flag-reschedule.timer`` must
+        NEVER be called in any reschedule scenario, regardless of whether unit
+        files changed or not.  Self-restarting the parent Persistent=true timer
+        can cause systemd to treat the just-elapsed 02:00 event as missed.
+        """
+        for unit_file_matches in (True, False):
+            with self.subTest(unit_file_matches=unit_file_matches):
+                calls = self._run_reschedule(unit_file_matches=unit_file_matches)
+                reschedule_activations = [
+                    c for c in calls
+                    if len(c) >= 2 and c[-1] == "flag-reschedule.timer"
+                       and c[0] in ("start", "restart", "enable")
+                ]
+                self.assertEqual(reschedule_activations, [],
+                                 "flag-reschedule.timer must not be started/restarted "
+                                 "during a reschedule run")
+
+
 if __name__ == "__main__":
     unittest.main()
