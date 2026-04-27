@@ -314,6 +314,10 @@ Each entry in `schedules` defines one scheduled audio play:
 
 Sunset-offset timers (`sunset-Nmin` / `sunset+Nmin`) are treated the same as plain `"sunset"` timers for scheduling purposes — they are recomputed daily at 02:00 by `flag-reschedule.timer` and on every boot by `flag-boot-reschedule.service`, with no stop/start cycle required.
 
+> **Note:** The `sunset` keyword and the `sunset±Nmin` syntax are matched **case-insensitively** — `"Sunset"`, `"SUNSET"`, `"Sunset-5min"`, and `"sunset-5MIN"` are all accepted. Leading/trailing whitespace is stripped automatically. Plain `"HH:MM"` strings are also whitespace-tolerant (e.g. `" 08:00 "` works).
+
+> **Note:** As of the Navy base bugle-call schedule update, the per-entry "scheduled at" output line now prefixes sunset-based entries with the original time string, e.g. `sunset → 17:32 America/New_York` (previously `17:32 America/New_York`). Plain HH:MM entries are unchanged.
+
 #### Current Navy base schedule
 
 | Name | Time | Audio file |
