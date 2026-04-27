@@ -1,6 +1,6 @@
 # Honor tradition with tech
 
-🎖️ **Honor tradition with tech** — This project plays the bugle calls **Colors** at 8:00 AM and **Taps** at sunset on a Sonos speaker automatically every day.
+🎖️ **Honor tradition with tech** — This project plays the bugle calls **Colors** at 8:00 AM and **Taps** at sunset on one or more Sonos speakers automatically every day.
 
 ---
 
@@ -8,7 +8,8 @@
 
 ✅ Play `colors.mp3` at **0800 sharp** every morning  
 🌅 Dynamically calculate **sunset time** to play `taps.mp3`  
-🔇 Pause what's playing and **restore** it after the call  
+🔊 **Multi-speaker synchronized playback** — configure one or more Sonos speakers; all play in sync via a temporary Sonos group  
+🔇 Pause what's playing and **restore** it after the call — per speaker, including volume  
 📄 Log every playback to `/opt/flag/sonos_play.log`  
 📡 Serve your MP3s via a **tiny HTTP server**  
 ⚙️ Customize everything via `/opt/flag/config.json`  
@@ -20,7 +21,7 @@
 ## 🧰 Requirements
 
 - 🐍 Python 3.8+
-- 📶 Sonos speaker on the local network
+- 📶 One or more Sonos speakers on the local network
 - 🖥️ Ubuntu/Debian VM, LXC container, or **Raspberry Pi** (systemd required)
 - 🎧 Default `colors.mp3` and `taps.mp3` audio files are included; replace with your own if desired
 
@@ -41,25 +42,28 @@ chmod +x setup.sh
 ```
 ╔══════════════════════════════════════════╗
 ║     Honor Tradition with Tech — Setup    ║
-║     Version 2.1.0                        ║
+║     Version 2.2.0                        ║
 ║     Status: ✅ Installed                  ║
 ╚══════════════════════════════════════════╝
-  Config: Speakers: 192.168.1.50, 192.168.1.51 | 2 schedule(s)
+  Config:  Speakers (2): Living Room (192.168.1.50), Kitchen (192.168.1.51)
+           Schedules: 2
+  Sunset:  🌅 19:45 (America/New_York)
 
   ── Read-only ──────────────────────────
   1) List scheduled plays
-  2) Test Sonos playback
-  3) View logs
+  2) Show sunset time
+  3) Test Sonos playback
+  4) View logs
 
   ── Configuration ──────────────────────
-  4) Install (first-time setup)
-  5) Upgrade (update scripts, keep config)
-  6) Reconfigure (edit config.json interactively)
+  5) Install (first-time setup)
+  6) Upgrade (update scripts, keep config)
+  7) Reconfigure (edit config.json interactively)
 
   ── Danger zone ────────────────────────
-  7) Uninstall completely
+  8) Uninstall completely
 
-  8) Exit without doing anything
+  9) Exit without doing anything
 ```
 
 > **Install state detection:** When `setup.sh` loads, it automatically checks for the Python virtual environment (`/opt/flag/sonos-env`), the config file (`/opt/flag/config.json`), and active systemd timers. If any component is missing, a warning is displayed above the menu with guidance on which option to select. On a fresh system, the "Install" option is marked with `← start here` and options that require a working installation are annotated with `(requires install)`.
@@ -67,13 +71,14 @@ chmod +x setup.sh
 | Option | Action |
 |--------|--------|
 | **1** | List scheduled plays — shows all configured schedules, systemd timer status, and audio HTTP server status |
-| **2** | Test Sonos playback — plays a test audio clip on your Sonos speaker |
-| **3** | View logs — shows the last 20 lines of `setup.log` and `sonos_play.log` |
-| **4** | Install (first-time setup) — installs system deps, downloads files, creates venv, runs config wizard, writes systemd timers |
-| **5** | Upgrade — downloads latest scripts from GitHub and upgrades pip packages; **preserves your existing `config.json`** |
-| **6** | Reconfigure — re-runs the config wizard to edit settings and regenerate timers |
-| **7** | Uninstall — removes all files, systemd services, and timers |
-| **8** | Exit without making any changes |
+| **2** | Show sunset time — calculates today's sunset based on your configured coordinates and displays the time (with any configured offset) |
+| **3** | Test Sonos playback — plays a test audio clip on your configured Sonos speaker(s) |
+| **4** | View logs — shows the last 20 lines of `setup.log` and `sonos_play.log` |
+| **5** | Install (first-time setup) — installs system deps, downloads files, creates venv, runs config wizard, writes systemd timers |
+| **6** | Upgrade — downloads latest scripts from GitHub and upgrades pip packages; **preserves your existing `config.json`** |
+| **7** | Reconfigure — re-runs the config wizard to edit settings and regenerate timers |
+| **8** | Uninstall — removes all files, systemd services, and timers |
+| **9** | Exit without making any changes |
 
 > The script will automatically download all required files from GitHub using wget (no `git clone` needed), create a Python virtual environment, install dependencies, and generate a default `config.json` if needed.
 
@@ -259,7 +264,7 @@ or, for taps:
 /opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://<your-pi-ip>:8000/taps.mp3
 ```
 
-If it works, you'll hear the audio play on your Sonos and see log output in `/opt/flag/sonos_play.log`.
+If it works, you'll hear the audio play on your configured Sonos speaker(s) and see log output in `/opt/flag/sonos_play.log`.
 
 ### 3. Check Installed Timers
 
@@ -321,6 +326,14 @@ cat /opt/flag/setup.log
 - **Why doesn't the reschedule restart the sunset timer?**  
   By design, the nightly 02:00 reschedule run stops sunset timers (e.g. `flag-taps.timer`) before rewriting their unit files, then leaves them stopped after `daemon-reload`. Starting (or restarting) a sunset timer at 02:00 causes systemd to invoke the associated service immediately at 02:00 — an unwanted early-morning audio play. The updated `OnCalendar` line is already written to disk and loaded by `daemon-reload`; systemd will activate the timer at the correct sunset time without an explicit `systemctl start`. If you ever need to immediately activate the sunset timer manually, run:  
   `sudo systemctl start flag-taps.timer`
+- **A speaker is not found or unreachable?**  
+  `sonos_play.py` logs a warning and skips the unreachable speaker — the remaining reachable speakers continue with synchronized playback. If **all** configured speakers are unreachable, the script exits with a non-zero code (so systemd marks the unit as failed). Check `/opt/flag/sonos_play.log` for `WARNING: Speaker at <IP> is unreachable` messages.
+- **How does grouping work with multiple speakers?**  
+  When playback starts, each target speaker is unjoined from its current group and temporarily placed under a single "bugle coordinator" (the first IP in the `speakers` list). Sonos keeps all members in sync automatically. After playback, each speaker rejoins its original group and transport state is restored.
+- **Does each speaker play at the same volume?**  
+  Yes. Every speaker in the `speakers` list is set to the configured `volume` for the duration of the bugle call. Each speaker's original volume is restored afterward.
+- **Will pre-existing speaker groups be disrupted?**  
+  Only temporarily. Each speaker is unjoined before playback and rejoined to its original group afterward. Speakers that are **not** in the `speakers` config list are never touched.
 
 ---
 
