@@ -8,7 +8,7 @@
 set -e
 set -o pipefail
 
-SETUP_VERSION="2.2.0"
+SETUP_VERSION="2.3.0"
 
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"
@@ -180,7 +180,9 @@ PYEOF
 
 # ---------------------------------------------------------------------------
 # Discover Sonos speakers and let the user select ONE OR MORE for synchronized
-# multi-speaker playback.  Sets SPEAKERS_JSON to a JSON array of IP strings.
+# multi-speaker playback.  Sets SPEAKERS_JSON to a JSON array of speaker objects
+# ({ip, name}).  Per-speaker volume is added later in configure_setup after the
+# global volume has been established.
 # Requires the Python venv (with soco installed) to already exist.
 # ---------------------------------------------------------------------------
 function discover_sonos_speakers() {
@@ -213,10 +215,11 @@ PYEOF
     echo "  Found Sonos speakers:"
     i=1
     declare -a DISC_IPS
-    # Read existing configured IPs for annotation
+    declare -a DISC_NAMES
+    # Read existing configured IPs for annotation (handle both legacy and new format)
     _existing_cfg_ips=""
     if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
-        _existing_cfg_ips=$(jq -r '.speakers // [] | .[]' "$CONFIG_FILE" 2>/dev/null) || true
+        _existing_cfg_ips=$(jq -r '.speakers // [] | map(if type == "string" then . else .ip end) | .[]' "$CONFIG_FILE" 2>/dev/null) || true
     fi
     while IFS=$'\t' read -r name ip; do
         _marker=""
@@ -225,6 +228,7 @@ PYEOF
         fi
         echo "    $i) $name — $ip${_marker}"
         DISC_IPS[$i]="$ip"
+        DISC_NAMES[$i]="$name"
         ((i++))
     done <<< "$DISCOVERED"
     COUNT=$((i - 1))
@@ -232,7 +236,7 @@ PYEOF
 
     if [ "$COUNT" -eq 1 ]; then
         echo "  ✅ Only one speaker found. Using: ${DISC_IPS[1]}"
-        SPEAKERS_JSON=$(jq -n --arg ip "${DISC_IPS[1]}" '[$ip]')
+        SPEAKERS_JSON=$(jq -n --arg ip "${DISC_IPS[1]}" --arg name "${DISC_NAMES[1]}" '[{ip: $ip, name: $name}]')
         return
     fi
 
@@ -244,7 +248,7 @@ PYEOF
             # Select all discovered speakers
             SPEAKERS_JSON="[]"
             for (( j=1; j<=COUNT; j++ )); do
-                SPEAKERS_JSON=$(echo "$SPEAKERS_JSON" | jq --arg ip "${DISC_IPS[$j]}" '. + [$ip]')
+                SPEAKERS_JSON=$(echo "$SPEAKERS_JSON" | jq --arg ip "${DISC_IPS[$j]}" --arg name "${DISC_NAMES[$j]}" '. + [{ip: $ip, name: $name}]')
             done
             echo "  ✅ Selected all $COUNT speaker(s)."
             return
@@ -256,7 +260,7 @@ PYEOF
         for _part in "${_parts[@]}"; do
             _n="${_part// /}"  # strip spaces
             if [[ "$_n" =~ ^[0-9]+$ ]] && [ "$_n" -ge 1 ] && [ "$_n" -le "$COUNT" ]; then
-                _selected_json=$(echo "$_selected_json" | jq --arg ip "${DISC_IPS[$_n]}" '. + [$ip]')
+                _selected_json=$(echo "$_selected_json" | jq --arg ip "${DISC_IPS[$_n]}" --arg name "${DISC_NAMES[$_n]}" '. + [{ip: $ip, name: $name}]')
             else
                 echo "  ⚠️  Invalid selection: '$_n'. Enter numbers between 1 and $COUNT."
                 _valid=false
@@ -300,11 +304,20 @@ function configure_setup() {
         fi
     fi
 
+    # Auto-migrate legacy speakers format (array of IP strings → array of objects)
+    if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
+        _is_legacy=$(jq '(.speakers // []) | if length == 0 then false else (.[0] | type == "string") end' "$CONFIG_FILE" 2>/dev/null || echo false)
+        if [ "$_is_legacy" = "true" ]; then
+            log "🔄 Migrating speakers from legacy IP-string format to object format..."
+            jq '.speakers |= map({ip: .})' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+        fi
+    fi
+
     # Speakers list — try auto-discovery first, fall back to manual entry
-    # Read existing speakers from config (new format) for use as a default display
+    # Read existing speaker IPs from config for use as a default display
     _existing_speakers_display=""
     if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
-        _existing_speakers_display=$(jq -r '.speakers // [] | join(", ")' "$CONFIG_FILE" 2>/dev/null || echo "")
+        _existing_speakers_display=$(jq -r '.speakers // [] | map(.ip) | join(", ")' "$CONFIG_FILE" 2>/dev/null || echo "")
     fi
 
     discover_sonos_speakers
@@ -319,19 +332,31 @@ function configure_setup() {
         if [ -z "$INPUT" ] && [ -n "$_existing_speakers_display" ]; then
             INPUT="$_existing_speakers_display"
         fi
-        # Build JSON array from comma-separated input
+        # Build JSON array of {ip} objects from comma-separated input,
+        # preserving any existing per-speaker volume from the current config.
         SPEAKERS_JSON="[]"
         IFS=',' read -ra _ips <<< "$INPUT"
         for _ip in "${_ips[@]}"; do
             _ip="${_ip// /}"  # strip spaces
             if [ -n "$_ip" ]; then
-                SPEAKERS_JSON=$(echo "$SPEAKERS_JSON" | jq --arg ip "$_ip" '. + [$ip]')
+                # Carry over existing object if available, else create a bare {ip}
+                _existing_obj="null"
+                if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
+                    _existing_obj=$(jq --arg ip "$_ip" \
+                        '(.speakers // []) | map(select(.ip == $ip)) | first // null' \
+                        "$CONFIG_FILE" 2>/dev/null || echo "null")
+                fi
+                if [ "$_existing_obj" != "null" ] && [ -n "$_existing_obj" ]; then
+                    SPEAKERS_JSON=$(echo "$SPEAKERS_JSON" | jq --argjson obj "$_existing_obj" '. + [$obj]')
+                else
+                    SPEAKERS_JSON=$(echo "$SPEAKERS_JSON" | jq --arg ip "$_ip" '. + [{ip: $ip}]')
+                fi
             fi
         done
     fi
 
     # Derive a single IP from SPEAKERS_JSON for local-IP detection below
-    SONOS_IP=$(echo "$SPEAKERS_JSON" | jq -r '.[0] // ""')
+    SONOS_IP=$(echo "$SPEAKERS_JSON" | jq -r '.[0].ip // ""')
 
     # HTTP server port
     default_port=$(cfg_default "port" "8000")
@@ -394,13 +419,63 @@ function configure_setup() {
     # Volume
     default_vol=$(cfg_default "volume" "30")
     while true; do
-        read -rp "  Sonos volume 0–100 [${default_vol}]: " INPUT
+        read -rp "  Sonos volume 0–100 (global default) [${default_vol}]: " INPUT
         VOLUME="${INPUT:-$default_vol}"
         if [[ "$VOLUME" =~ ^[0-9]+$ ]] && [ "$VOLUME" -ge 0 ] && [ "$VOLUME" -le 100 ]; then
             break
         fi
         echo "  ⚠️  Please enter a number between 0 and 100."
     done
+
+    # Per-speaker volume overrides
+    # Walk through each speaker in SPEAKERS_JSON and optionally prompt for a
+    # volume override.  Pressing Enter keeps the speaker at the global default.
+    _spk_count=$(echo "$SPEAKERS_JSON" | jq 'length')
+    if [ "$_spk_count" -gt 0 ]; then
+        echo ""
+        echo "  Per-speaker volume overrides (Enter to use global default of $VOLUME):"
+        _new_speakers_json="[]"
+        for (( _si=0; _si<_spk_count; _si++ )); do
+            _spk_obj=$(echo "$SPEAKERS_JSON" | jq ".[$_si]")
+            _spk_ip=$(echo "$_spk_obj" | jq -r '.ip // ""')
+            _spk_name=$(echo "$_spk_obj" | jq -r '.name // ""')
+            # Use existing per-speaker volume as default if present, else global
+            _spk_existing_vol=$(echo "$_spk_obj" | jq -r 'if has("volume") then .volume | tostring else "" end')
+            if [ -n "$_spk_existing_vol" ]; then
+                _spk_default="$_spk_existing_vol"
+            else
+                _spk_default="$VOLUME"
+            fi
+            if [ -n "$_spk_name" ]; then
+                _spk_label="\"$_spk_name\" ($_spk_ip)"
+            else
+                _spk_label="$_spk_ip"
+            fi
+            while true; do
+                read -rp "  Volume for ${_spk_label} [${_spk_default}]: " _spk_vol_input
+                _spk_vol_input="${_spk_vol_input:-$_spk_default}"
+                if [[ "$_spk_vol_input" =~ ^[0-9]+$ ]] && [ "$_spk_vol_input" -ge 0 ] && [ "$_spk_vol_input" -le 100 ]; then
+                    break
+                fi
+                echo "  ⚠️  Please enter a number between 0 and 100."
+            done
+            if [ "$_spk_vol_input" = "$VOLUME" ]; then
+                # Volume matches global default — omit the field so the speaker uses
+                # the top-level default implicitly (keeps config clean).
+                _new_speakers_json=$(echo "$_new_speakers_json" | jq \
+                    --argjson obj "$_spk_obj" \
+                    --argjson vol "$_spk_vol_input" \
+                    '. + [$obj | del(.volume)]')
+            else
+                # Volume differs from global — store explicit per-speaker override.
+                _new_speakers_json=$(echo "$_new_speakers_json" | jq \
+                    --argjson obj "$_spk_obj" \
+                    --argjson vol "$_spk_vol_input" \
+                    '. + [$obj + {volume: $vol}]')
+            fi
+        done
+        SPEAKERS_JSON="$_new_speakers_json"
+    fi
 
     # Wait seconds (fallback only — not exposed in wizard)
     WAIT_SECS=$(cfg_default "default_wait_seconds" "60")
@@ -744,7 +819,7 @@ function test_sonos_playback() {
     # Option 0: run directly against the full config file (no temp-config rewrite)
     if [ "$_USE_CONFIG_FILE_DIRECTLY" = "true" ]; then
         TEST_URL=$(jq -r '(.schedules[0].audio_url // "")' "$CONFIG_FILE")
-        _cfg_speakers=$(jq -r '.speakers // [] | join(", ")' "$CONFIG_FILE" 2>/dev/null || echo "configured")
+        _cfg_speakers=$(jq -r '.speakers // [] | map(if type == "string" then . else .ip end) | join(", ")' "$CONFIG_FILE" 2>/dev/null || echo "configured")
         echo ""
         echo "  🔊 Playing test sound on configured speaker(s): $_cfg_speakers ..."
         echo "     URL: $TEST_URL"
@@ -797,8 +872,19 @@ function test_sonos_playback() {
     echo "     tail -f $LOG_FILE"
     echo ""
 
+    # Build speaker objects for the temp config, preserving per-speaker volumes
+    # from the existing config when the selected IP matches a configured speaker.
+    _EXISTING_SPEAKERS=$(jq '.speakers // []' "$CONFIG_FILE" 2>/dev/null || echo '[]')
+    _SPEAKERS_WITH_VOLS=$(echo "$SONOS_IPS_JSON" | jq \
+        --argjson existing "$_EXISTING_SPEAKERS" \
+        'map(. as $ip |
+            ($existing | map(
+                if type == "string" then {ip: .} else . end
+            ) | map(select(.ip == $ip)) | first) // {ip: $ip}
+        )')
+
     TMPCONFIG=$(mktemp --suffix=.json) || { echo "  ❌ Failed to create temp file."; return 1; }
-    if ! jq --argjson speakers "$SONOS_IPS_JSON" '.speakers = $speakers' "$CONFIG_FILE" > "$TMPCONFIG"; then
+    if ! jq --argjson speakers "$_SPEAKERS_WITH_VOLS" '.speakers = $speakers' "$CONFIG_FILE" > "$TMPCONFIG"; then
         rm -f "$TMPCONFIG"
         echo "  ❌ Failed to build test config. Check $CONFIG_FILE."
         return 1
@@ -945,13 +1031,27 @@ function _resolve_speaker_names() {
         return
     fi
 
+    # Extract speaker objects, normalising legacy string entries to {ip} objects
+    local _speakers_json
+    _speakers_json=$(jq '[.speakers // [] | .[] | if type == "string" then {ip: .} else . end]' "$_cfg" 2>/dev/null) || true
+    if [ -z "$_speakers_json" ] || [ "$_speakers_json" = "[]" ]; then
+        return
+    fi
+
     local _raw_ips
-    _raw_ips=$(jq -r '.speakers // [] | .[]' "$_cfg" 2>/dev/null) || true
+    _raw_ips=$(echo "$_speakers_json" | jq -r '.[].ip') || true
     if [ -z "$_raw_ips" ]; then
         return
     fi
 
-    # Collect IPs not yet in the session cache
+    # Seed the session cache with names stored in the config (fast, works offline)
+    while IFS=$'\t' read -r _cip _cname; do
+        if [ -n "$_cname" ] && [[ -z "${_SPEAKER_NAME_CACHE[$_cip]+x}" ]]; then
+            _SPEAKER_NAME_CACHE["$_cip"]="$_cname"
+        fi
+    done < <(echo "$_speakers_json" | jq -r '.[] | select(.name? and .name != "") | [.ip, .name] | @tsv' 2>/dev/null || true)
+
+    # Collect IPs not yet in the session cache for soco batch lookup
     local _needs_lookup=()
     while IFS= read -r _ip; do
         if [[ -z "${_SPEAKER_NAME_CACHE[$_ip]+x}" ]]; then
@@ -990,14 +1090,26 @@ PYEOF
         done
     fi
 
-    # Build display string from cache (or bare IPs where name is unknown)
+    # Build display string from cache + per-speaker volume annotation
+    local _global_vol
+    _global_vol=$(jq -r '.volume // 30' "$_cfg" 2>/dev/null || echo 30)
     local _parts=()
     while IFS= read -r _ip; do
         local _name="${_SPEAKER_NAME_CACHE[$_ip]:-}"
+        # Per-speaker volume (if explicitly set in config)
+        local _spk_vol
+        _spk_vol=$(echo "$_speakers_json" | jq -r \
+            --arg ip "$_ip" \
+            '[.[] | select(.ip == $ip)] | first | if has("volume") then .volume | tostring else "" end' \
+            2>/dev/null || echo "")
+        local _vol_annotation=""
+        if [ -n "$_spk_vol" ]; then
+            _vol_annotation=" @${_spk_vol}"
+        fi
         if [ -n "$_name" ]; then
-            _parts+=("$_name ($_ip)")
+            _parts+=("${_name} ${_ip}${_vol_annotation}")
         else
-            _parts+=("$_ip")
+            _parts+=("${_ip}${_vol_annotation}")
         fi
     done <<< "$_raw_ips"
 

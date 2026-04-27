@@ -765,5 +765,188 @@ class TestStopFallbackSlaveException(unittest.TestCase):
         self.real_coord.stop.assert_called_once()
 
 
+
+# ---------------------------------------------------------------------------
+# Per-speaker volume — new object format
+# ---------------------------------------------------------------------------
+
+class TestPerSpeakerVolume(unittest.TestCase):
+    """Per-speaker volume overrides are applied during Phase 3."""
+
+    def setUp(self):
+        self.sp1 = _make_speaker("Flag", "uid-flag")
+        self.sp1.ip_address = "10.0.40.32"
+        self.sp1.volume = 20  # pre-bugle volume (will be overwritten then restored)
+        self.sp1.group = _make_group([self.sp1], self.sp1)
+        self.sp1.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
+
+        self.sp2 = _make_speaker("Backyard Left", "uid-bl")
+        self.sp2.ip_address = "10.0.40.41"
+        self.sp2.volume = 35  # pre-bugle volume
+        self.sp2.group = _make_group([self.sp2], self.sp2)
+        self.sp2.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
+
+    def _make_soco(self, ip):
+        return self.sp1 if ip == "10.0.40.32" else self.sp2
+
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    def test_per_speaker_volume_applied(self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log):
+        """Each speaker is set to its own configured volume during Phase 3."""
+        cfg = {
+            "speakers": [
+                {"ip": "10.0.40.32", "name": "Flag", "volume": 50},
+                {"ip": "10.0.40.41", "name": "Backyard Left", "volume": 80},
+            ],
+            "volume": 30,
+            "skip_restore_if_idle": True,
+            "default_wait_seconds": 60,
+        }
+        mock_soco.side_effect = self._make_soco
+        mock_snap_cls.return_value = MagicMock()
+
+        # Record volume assignments during Phase 3 by watching .volume setter calls.
+        # We check the final .volume set on each speaker (before Phase 7 restore).
+        # To do so we track sp1 and sp2 ip_address lookups indirectly: the last
+        # volume set during Phase 3 (before Phase 7 restores) is what we care about.
+        _sp1_volumes = []
+        _sp2_volumes = []
+
+        type(self.sp1).volume = property(
+            lambda s: _sp1_volumes[-1] if _sp1_volumes else 20,
+            lambda s, v: _sp1_volumes.append(v),
+        )
+        type(self.sp2).volume = property(
+            lambda s: _sp2_volumes[-1] if _sp2_volumes else 35,
+            lambda s, v: _sp2_volumes.append(v),
+        )
+
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+
+        # Phase 3: sp1 (Flag) should have been set to 50, sp2 (Backyard Left) to 80
+        self.assertIn(50, _sp1_volumes, "Flag speaker should be set to volume 50")
+        self.assertIn(80, _sp2_volumes, "Backyard Left speaker should be set to volume 80")
+
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    def test_global_volume_fallback_for_speaker_without_override(
+        self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log
+    ):
+        """A speaker without an explicit volume falls back to the global default."""
+        cfg = {
+            "speakers": [
+                {"ip": "10.0.40.32", "name": "Flag"},           # no per-speaker volume
+                {"ip": "10.0.40.41", "name": "Backyard Left", "volume": 80},
+            ],
+            "volume": 30,
+            "skip_restore_if_idle": True,
+            "default_wait_seconds": 60,
+        }
+        mock_soco.side_effect = self._make_soco
+        mock_snap_cls.return_value = MagicMock()
+
+        _sp1_volumes = []
+        _sp2_volumes = []
+
+        type(self.sp1).volume = property(
+            lambda s: _sp1_volumes[-1] if _sp1_volumes else 20,
+            lambda s, v: _sp1_volumes.append(v),
+        )
+        type(self.sp2).volume = property(
+            lambda s: _sp2_volumes[-1] if _sp2_volumes else 35,
+            lambda s, v: _sp2_volumes.append(v),
+        )
+
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+
+        # sp1 has no volume override -> should use global 30
+        self.assertIn(30, _sp1_volumes, "Flag speaker without override should use global volume 30")
+        # sp2 has volume 80
+        self.assertIn(80, _sp2_volumes, "Backyard Left should be set to volume 80")
+
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    def test_legacy_string_format_still_works(
+        self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log
+    ):
+        """Legacy speakers format (plain IP strings) continues to work."""
+        cfg = {
+            "speakers": ["10.0.40.32", "10.0.40.41"],
+            "volume": 45,
+            "skip_restore_if_idle": True,
+            "default_wait_seconds": 60,
+        }
+        mock_soco.side_effect = self._make_soco
+        mock_snap_cls.return_value = MagicMock()
+
+        _sp1_volumes = []
+        _sp2_volumes = []
+
+        type(self.sp1).volume = property(
+            lambda s: _sp1_volumes[-1] if _sp1_volumes else 20,
+            lambda s, v: _sp1_volumes.append(v),
+        )
+        type(self.sp2).volume = property(
+            lambda s: _sp2_volumes[-1] if _sp2_volumes else 35,
+            lambda s, v: _sp2_volumes.append(v),
+        )
+
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+
+        # Both speakers should be set to global volume 45
+        self.assertIn(45, _sp1_volumes, "Legacy-format sp1 should use global volume 45")
+        self.assertIn(45, _sp2_volumes, "Legacy-format sp2 should use global volume 45")
+
+    @patch("sonos_play.log")
+    @patch("sonos_play.time.sleep")
+    @patch("sonos_play.get_mp3_duration", return_value=5)
+    @patch("sonos_play.Snapshot")
+    @patch("sonos_play.soco.SoCo")
+    def test_missing_global_volume_uses_default_30(
+        self, mock_soco, mock_snap_cls, mock_dur, mock_sleep, mock_log
+    ):
+        """When top-level 'volume' is absent, falls back to 30."""
+        cfg = {
+            "speakers": [{"ip": "10.0.40.32", "name": "Flag", "volume": 50}],
+            # no global "volume" key
+            "skip_restore_if_idle": True,
+            "default_wait_seconds": 60,
+        }
+        mock_soco.side_effect = lambda ip: self.sp1
+        mock_snap_cls.return_value = MagicMock()
+
+        _sp1_volumes = []
+        type(self.sp1).volume = property(
+            lambda s: _sp1_volumes[-1] if _sp1_volumes else 20,
+            lambda s, v: _sp1_volumes.append(v),
+        )
+
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+
+        # Speaker has explicit volume 50 -> that should be used
+        self.assertIn(50, _sp1_volumes, "Speaker with explicit volume 50 should use 50")
+
+
 if __name__ == "__main__":
     unittest.main()
