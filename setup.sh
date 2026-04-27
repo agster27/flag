@@ -8,7 +8,7 @@
 set -e
 set -o pipefail
 
-SETUP_VERSION="2.4.0"
+SETUP_VERSION="2.4.1"
 
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"
@@ -38,7 +38,12 @@ maybe_sudo chown "$(whoami)" "$INSTALL_DIR"
 touch "$LOG_FILE"
 
 function log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+    local _msg="[$(date +'%Y-%m-%d %H:%M:%S')] $*"
+    if [[ -n "$LOG_FILE" && -d "$(dirname "$LOG_FILE")" && -w "$(dirname "$LOG_FILE")" ]]; then
+        echo "$_msg" | tee -a "$LOG_FILE"
+    else
+        echo "$_msg"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1279,6 +1284,7 @@ function uninstall_all() {
     # -------------------------------------------------------------------------
     if [ -d "$INSTALL_DIR" ]; then
         maybe_sudo rm -rf "$INSTALL_DIR"
+        LOG_FILE=""
         (( _removed_dirs++ )) || true
         log "🗑️  Removed: $INSTALL_DIR"
     else
