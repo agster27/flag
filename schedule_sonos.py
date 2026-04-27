@@ -85,7 +85,7 @@ def parse_sunset_offset(time_str: str):
     if not m:
         return None
     sign, mins = m.group(1), int(m.group(2))
-    if mins <= 0 or mins > 720:
+    if mins == 0 or mins > 720:
         raise ValueError(
             f"Sunset offset out of range: '{time_str}' (must be 1-720 minutes)"
         )
@@ -797,8 +797,16 @@ def main():
         audio_url = entry["audio_url"]
         time_str = entry["time"]
 
-        # Resolve the fire time to (hour, minute) in local time
-        is_sunset_based = (time_str == "sunset") or (parse_sunset_offset(time_str) is not None)
+        # Resolve the fire time to (hour, minute) in local time.
+        # Pre-compute sunset offset (None if not a sunset-offset string) so we
+        # don't run the regex twice and can propagate ValueError cleanly.
+        try:
+            _sunset_offset = parse_sunset_offset(time_str)
+        except ValueError as exc:
+            print(f"  ⚠️  Skipping '{name}': {exc}")
+            _log.warning("Skipping '%s': %s", name, exc)
+            continue
+        is_sunset_based = (time_str == "sunset") or (_sunset_offset is not None)
         if time_str == "sunset":
             try:
                 hour, minute = get_sunset_local_time(config)
@@ -814,50 +822,43 @@ def main():
                 "(OnCalendar=*-*-* %02d:%02d:00, Persistent=false)",
                 name, hour, minute, tz_name, hour, minute,
             )
+        elif _sunset_offset is not None:
+            try:
+                hour, minute = get_sunset_local_time_with_offset(config, _sunset_offset)
+            except ValueError as exc:
+                print(
+                    f"  ⚠️  Skipping '{name}': cannot compute sunset for today — {exc}"
+                )
+                _log.warning("Skipping '%s': cannot compute sunset for today — %s", name, exc)
+                continue
+            _log.info(
+                "Schedule '%s': %s → %02d:%02d %s "
+                "(OnCalendar=*-*-* %02d:%02d:00, Persistent=false)",
+                name, time_str, hour, minute, tz_name, hour, minute,
+            )
         else:
             try:
-                offset = parse_sunset_offset(time_str)
-            except ValueError as exc:
-                print(f"  ⚠️  Skipping '{name}': {exc}")
-                _log.warning("Skipping '%s': %s", name, exc)
+                parts = time_str.split(":")
+                if len(parts) != 2:
+                    raise ValueError("Expected HH:MM format")
+                hour, minute = int(parts[0]), int(parts[1])
+                if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                    raise ValueError(f"Time out of range: {time_str}")
+            except (ValueError, AttributeError):
+                print(
+                    f"  ⚠️  Skipping '{name}': invalid time format '{time_str}' "
+                    "(expected HH:MM (00–23 / 00–59), 'sunset', or 'sunset±Nmin' "
+                    "(e.g. 'sunset-5min'))"
+                )
+                _log.warning(
+                    "Skipping '%s': invalid time format '%s'", name, time_str,
+                )
                 continue
-            if offset is not None:
-                try:
-                    hour, minute = get_sunset_local_time_with_offset(config, offset)
-                except ValueError as exc:
-                    print(
-                        f"  ⚠️  Skipping '{name}': cannot compute sunset for today — {exc}"
-                    )
-                    _log.warning("Skipping '%s': cannot compute sunset for today — %s", name, exc)
-                    continue
-                _log.info(
-                    "Schedule '%s': %s → %02d:%02d %s "
-                    "(OnCalendar=*-*-* %02d:%02d:00, Persistent=false)",
-                    name, time_str, hour, minute, tz_name, hour, minute,
-                )
-            else:
-                try:
-                    parts = time_str.split(":")
-                    if len(parts) != 2:
-                        raise ValueError("Expected HH:MM format")
-                    hour, minute = int(parts[0]), int(parts[1])
-                    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                        raise ValueError(f"Time out of range: {time_str}")
-                except (ValueError, AttributeError):
-                    print(
-                        f"  ⚠️  Skipping '{name}': invalid time format '{time_str}' "
-                        "(expected HH:MM (00–23 / 00–59), 'sunset', or 'sunset±Nmin' "
-                        "(e.g. 'sunset-5min'))"
-                    )
-                    _log.warning(
-                        "Skipping '%s': invalid time format '%s'", name, time_str,
-                    )
-                    continue
-                _log.info(
-                    "Schedule '%s': fixed time %s %s "
-                    "(OnCalendar=*-*-* %02d:%02d:00, Persistent=false)",
-                    name, time_str, tz_name, hour, minute,
-                )
+            _log.info(
+                "Schedule '%s': fixed time %s %s "
+                "(OnCalendar=*-*-* %02d:%02d:00, Persistent=false)",
+                name, time_str, tz_name, hour, minute,
+            )
 
         service_path = os.path.join(SYSTEMD_DIR, f"flag-{name}.service")
         timer_path = os.path.join(SYSTEMD_DIR, f"flag-{name}.timer")
