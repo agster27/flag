@@ -50,7 +50,7 @@ SONOS_PLAY = os.path.join(INSTALL_DIR, "sonos_play.py")
 SCHEDULE_SCRIPT = os.path.abspath(__file__)
 
 # Name suffixes (after "flag-") of units that must never be removed by stale cleanup
-_RESERVED_NAMES = {"audio-http", "reschedule"}
+_RESERVED_NAMES = {"audio-http", "reschedule", "boot-reschedule"}
 
 
 # ---------------------------------------------------------------------------
@@ -335,15 +335,13 @@ def _build_service_unit(name, audio_url):
     )
 
 
-def _build_timer_unit(name, hour, minute, persistent=True):
+def _build_timer_unit(name, hour, minute):
     """
     Return the content of a systemd ``.timer`` unit that fires at a given local time.
 
-    ``Persistent=true`` ensures that a missed firing (e.g. because the Raspberry
-    Pi was off) is executed on the next boot.  Set ``persistent=False`` for
-    sunset-based schedules so that a missed sunset is **not** replayed later
-    (e.g. at 02:00 after a reboot).  ``WantedBy=timers.target`` is required so
-    that ``systemctl enable`` works correctly.
+    ``Persistent=false`` ensures that missed firings are never replayed — a missed
+    scheduled play is simply skipped, never replayed late.  ``WantedBy=timers.target``
+    is required so that ``systemctl enable`` works correctly.
 
     systemd interprets ``OnCalendar=`` times in the system's local timezone
     (configured via ``/etc/localtime`` or ``TZ``), so no UTC conversion is needed
@@ -353,21 +351,17 @@ def _build_timer_unit(name, hour, minute, persistent=True):
         name (str): Sanitised schedule name (used only in ``Description``).
         hour (int): Local hour to fire (0–23).
         minute (int): Local minute to fire (0–59).
-        persistent (bool): Whether to set ``Persistent=true`` in the timer unit.
-            Defaults to ``True``.  Pass ``False`` for sunset-based schedules to
-            prevent catch-up fires after a missed sunset.
 
     Returns:
         str: Unit file content ready to be written to disk.
     """
-    persistent_val = "true" if persistent else "false"
     return (
         "[Unit]\n"
         f"Description=Flag Audio Timer — {name}\n"
         "\n"
         "[Timer]\n"
         f"OnCalendar=*-*-* {hour:02d}:{minute:02d}:00\n"
-        f"Persistent={persistent_val}\n"
+        "Persistent=false\n"
         "\n"
         "[Install]\n"
         "WantedBy=timers.target\n"
@@ -402,8 +396,9 @@ def _build_reschedule_timer():
     Return the content of the ``flag-reschedule.timer`` unit.
 
     Fires daily at 02:00 local time to recalculate sunset-based timers.
-    ``Persistent=true`` ensures recalculation happens after a Raspberry Pi
-    that was off at 02:00 boots up later in the day.
+    ``Persistent=false`` ensures a missed 02:00 recalculation is not replayed
+    later — boot-time recovery is handled by ``flag-boot-reschedule.service``
+    instead.
 
     Returns:
         str: Unit file content ready to be written to disk.
@@ -414,16 +409,53 @@ def _build_reschedule_timer():
         "\n"
         "[Timer]\n"
         "OnCalendar=*-*-* 02:00:00\n"
-        "Persistent=true\n"
+        "Persistent=false\n"
         "\n"
         "[Install]\n"
         "WantedBy=timers.target\n"
     )
+def _build_boot_reschedule_service(schedule_names=None):
+    """
+    Return the content of the ``flag-boot-reschedule.service`` unit.
+
+    This oneshot service runs once on every boot (after the network is up) to
+    recompute today's sunset time and rewrite any sunset-based timer unit files.
+    Combined with ``Persistent=false`` on all timers, this ensures that after any
+    outage or reboot, schedules resume at their next correct fire time and no
+    missed play is ever replayed late.
+
+    Args:
+        schedule_names (list[str] | None): Sanitised schedule names used to
+            generate the ``Before=`` ordering constraint so that this service
+            completes before the named schedule timers can fire.  If ``None``
+            or empty, the ``Before=`` line is omitted.
+
+    Returns:
+        str: Unit file content ready to be written to disk.
+    """
+    before_line = ""
+    if schedule_names:
+        before_units = " ".join(f"flag-{n}.timer" for n in schedule_names)
+        before_line = f"Before={before_units}\n"
+    return (
+        "[Unit]\n"
+        "Description=Flag Audio — recompute sunset timers on boot\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
+        f"{before_line}"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart={PYTHON_BIN} {SCHEDULE_SCRIPT}\n"
+        "RemainAfterExit=no\n"
+        "User=root\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
 
 
-# ---------------------------------------------------------------------------
-# Systemd management helpers
-# ---------------------------------------------------------------------------
+
 
 def _run_systemctl(*args):
     """
@@ -582,10 +614,11 @@ def main():
        sunset in local time) and write a ``.service`` + ``.timer`` pair
        atomically.
     6. Write the ``flag-reschedule`` service/timer pair (daily at 02:00).
-    7. Remove any stale ``flag-*.timer`` / ``flag-*.service`` unit files that
+    7. Write the ``flag-boot-reschedule.service`` oneshot unit (runs on boot).
+    8. Remove any stale ``flag-*.timer`` / ``flag-*.service`` unit files that
        are no longer in the current schedule list.
-    8. Run ``systemctl daemon-reload``; print a clear error and exit on failure.
-    9. Activate timers:
+    9. Run ``systemctl daemon-reload``; print a clear error and exit on failure.
+    10. Activate timers:
 
        - **Reschedule run**: restart fixed-time timers normally.  Sunset timers
          are left active — ``daemon-reload`` re-arms an already-active timer
@@ -594,13 +627,14 @@ def main():
          caused the timer to fire immediately after ``systemctl start``, even with
          ``Persistent=false``, due to systemd's next-elapse recalculation after a
          stop+reload cycle.)  ``flag-reschedule.timer`` is also skipped — it is
-         always hardcoded to 02:00 and restarting your own parent timer with
-         ``Persistent=true`` at the exact ``OnCalendar`` time can cause systemd to
-         treat the just-elapsed event as "missed" and fire again.
+         always hardcoded to 02:00 and restarting your own parent timer at the
+         exact ``OnCalendar`` time can cause systemd to treat the just-elapsed
+         event as "missed" and fire again.
        - **First-install run**: run ``systemctl enable --now`` for all timers
-         including ``flag-reschedule.timer``.
+         including ``flag-reschedule.timer``, and ``systemctl enable`` (no
+         ``--now``) for ``flag-boot-reschedule.service``.
 
-    10. Print a summary of installed timers.
+    11. Print a summary of installed timers.
 
     Raises:
         SystemExit: On ``daemon-reload`` failure, duplicate schedule names,
@@ -731,7 +765,7 @@ def main():
                 continue
             _log.info(
                 "Schedule '%s': fixed time %s %s "
-                "(OnCalendar=*-*-* %02d:%02d:00, Persistent=true)",
+                "(OnCalendar=*-*-* %02d:%02d:00, Persistent=false)",
                 name, time_str, tz_name, hour, minute,
             )
 
@@ -739,10 +773,10 @@ def main():
         timer_path = os.path.join(SYSTEMD_DIR, f"flag-{name}.timer")
 
         service_content = _build_service_unit(name, audio_url)
-        timer_content = _build_timer_unit(name, hour, minute, persistent=(time_str != "sunset"))
+        timer_content = _build_timer_unit(name, hour, minute)
 
         # Only write unit files when content has actually changed to avoid
-        # unnecessary daemon-reload cycles and spurious Persistent=true catch-up fires.
+        # unnecessary daemon-reload cycles.
         unit_changed = False
         if not _unit_file_content_matches(service_path, service_content):
             _write_unit_file(service_path, service_content)
@@ -784,6 +818,17 @@ def main():
         "(flag-reschedule.timer → flag-reschedule.service)"
     )
 
+    # --- Write the boot-time reschedule service ---
+    boot_reschedule_svc_content = _build_boot_reschedule_service(sorted(written_names))
+    boot_reschedule_svc_path = os.path.join(SYSTEMD_DIR, "flag-boot-reschedule.service")
+    if not _unit_file_content_matches(boot_reschedule_svc_path, boot_reschedule_svc_content):
+        _write_unit_file(boot_reschedule_svc_path, boot_reschedule_svc_content)
+        any_file_written = True
+    print(
+        "  ✅ Boot-reschedule: recompute sunset on boot "
+        "(flag-boot-reschedule.service)"
+    )
+
     # --- Remove stale unit files from previous runs ---
     stale_removed = _clean_stale_units(written_names)
 
@@ -806,8 +851,8 @@ def main():
     if is_reschedule:
         # Reschedule run: restart fixed-time timers only when their unit file
         # actually changed.  Skipping the restart when content is unchanged
-        # prevents Persistent=true catch-up fires at 02:00 — if the stamp is
-        # still valid there is no reason to reset it with a restart.
+        # avoids an unnecessary timer reset — if the stamp is still valid there
+        # is no reason to reset it with a restart.
         #
         # Sunset timers are left active across the unit-file rewrite.  systemd
         # re-reads the updated unit file on daemon-reload and re-arms an
@@ -843,8 +888,7 @@ def main():
                 # Fixed-time timer: safe to restart when OnCalendar (e.g. 08:00)
                 # has not yet elapsed at the 02:00 reschedule time, BUT only
                 # restart if the unit file actually changed.  An unchanged unit
-                # file means the stamp is still valid — restarting would clear
-                # it and could trigger a Persistent=true catch-up fire.
+                # file means the stamp is still valid — restarting would clear it.
                 if name in changed_units:
                     _log.info("Restarting %s (fixed-time timer)", timer_name)
                     try:
@@ -859,10 +903,9 @@ def main():
                     print(f"  ✅ {timer_name}: unit file unchanged, skipping restart")
 
         # Skip flag-reschedule.timer — it is hardcoded to 02:00 and never
-        # changes, so there is nothing to update.  More importantly, restarting
-        # your own parent timer with Persistent=true at the exact OnCalendar
-        # time causes systemd to clear the last-trigger timestamp and may fire
-        # the timer again immediately as a catch-up.
+        # changes, so there is nothing to update.  Restarting your own parent
+        # timer at the exact OnCalendar time causes systemd to clear the
+        # last-trigger timestamp and may fire the timer again immediately.
         _log.info(
             "Skipping flag-reschedule.timer restart (reschedule run — "
             "hardcoded 02:00 schedule never changes)"
@@ -883,12 +926,24 @@ def main():
                 print(f"  ⚠️  Could not activate {timer}: {exc}")
                 _log.error("Could not enable %s: %s", timer, exc)
 
+        # Enable (but do not start) the boot-reschedule service — it is a
+        # oneshot that runs on the next boot, not right now.
+        _log.info("Enabling flag-boot-reschedule.service (first install)")
+        try:
+            _run_systemctl("enable", "flag-boot-reschedule.service")
+            print("  ✅ Enabled: flag-boot-reschedule.service")
+            _log.info("Enabled flag-boot-reschedule.service successfully")
+        except RuntimeError as exc:
+            print(f"  ⚠️  Could not enable flag-boot-reschedule.service: {exc}")
+            _log.error("Could not enable flag-boot-reschedule.service: %s", exc)
+
     # --- Summary ---
     print("")
     print("Installed systemd timers:")
     for name in sorted(written_names):
         print(f"  flag-{name}.timer  →  flag-{name}.service")
     print("  flag-reschedule.timer  →  flag-reschedule.service")
+    print("  flag-boot-reschedule.service  (oneshot on boot)")
     print("")
     print("To verify:   systemctl list-timers --all | grep flag")
     first_name = sorted(written_names)[0] if written_names else "colors"

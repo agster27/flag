@@ -266,7 +266,7 @@ class TestRescheduleOptimization(unittest.TestCase):
         """
         Regression guard: ``systemctl restart flag-reschedule.timer`` must
         NEVER be called in any reschedule scenario, regardless of whether unit
-        files changed or not.  Self-restarting the parent Persistent=true timer
+        files changed or not.  Self-restarting the parent timer
         can cause systemd to treat the just-elapsed 02:00 event as missed.
         """
         for unit_file_matches in (True, False):
@@ -282,5 +282,164 @@ class TestRescheduleOptimization(unittest.TestCase):
                                  "during a reschedule run")
 
 
-if __name__ == "__main__":
-    unittest.main()
+# ---------------------------------------------------------------------------
+# Persistent=false regression tests
+# ---------------------------------------------------------------------------
+
+class TestPersistentFalse(unittest.TestCase):
+    """
+    Verify that every generated timer unit contains ``Persistent=false``.
+
+    This is the primary regression guard ensuring that no timer can ever
+    replay a missed fire after a reboot or outage.
+    """
+
+    def test_schedule_timer_persistent_false(self):
+        """Fixed-time schedule timer must contain Persistent=false."""
+        import schedule_sonos
+        content = schedule_sonos._build_timer_unit("colors", 8, 0)
+        self.assertIn("Persistent=false", content,
+                      "Fixed-time timer must contain Persistent=false")
+        self.assertNotIn("Persistent=true", content,
+                         "Fixed-time timer must not contain Persistent=true")
+
+    def test_sunset_timer_persistent_false(self):
+        """Sunset-based schedule timer must contain Persistent=false."""
+        import schedule_sonos
+        content = schedule_sonos._build_timer_unit("taps", 19, 30)
+        self.assertIn("Persistent=false", content,
+                      "Sunset timer must contain Persistent=false")
+        self.assertNotIn("Persistent=true", content,
+                         "Sunset timer must not contain Persistent=true")
+
+    def test_reschedule_timer_persistent_false(self):
+        """flag-reschedule.timer must contain Persistent=false."""
+        import schedule_sonos
+        content = schedule_sonos._build_reschedule_timer()
+        self.assertIn("Persistent=false", content,
+                      "Reschedule timer must contain Persistent=false")
+        self.assertNotIn("Persistent=true", content,
+                         "Reschedule timer must not contain Persistent=true")
+
+    def test_build_timer_unit_no_persistent_param(self):
+        """_build_timer_unit must not accept a 'persistent' keyword argument."""
+        import schedule_sonos
+        import inspect
+        sig = inspect.signature(schedule_sonos._build_timer_unit)
+        self.assertNotIn("persistent", sig.parameters,
+                         "_build_timer_unit must not expose a 'persistent' parameter")
+
+
+# ---------------------------------------------------------------------------
+# Boot-reschedule service tests
+# ---------------------------------------------------------------------------
+
+class TestBootRescheduleService(unittest.TestCase):
+    """
+    Verify that flag-boot-reschedule.service is generated and written correctly.
+    """
+
+    def test_boot_reschedule_service_content(self):
+        """Builder returns a valid oneshot unit targeting multi-user.target."""
+        import schedule_sonos
+        content = schedule_sonos._build_boot_reschedule_service(["colors", "taps"])
+        self.assertIn("[Unit]", content)
+        self.assertIn("[Service]", content)
+        self.assertIn("[Install]", content)
+        self.assertIn("Type=oneshot", content)
+        self.assertIn("WantedBy=multi-user.target", content)
+        self.assertIn("network-online.target", content)
+        self.assertIn("Before=flag-colors.timer flag-taps.timer", content)
+
+    def test_boot_reschedule_service_no_before_when_empty(self):
+        """Builder omits Before= when schedule_names is empty or None."""
+        import schedule_sonos
+        for arg in (None, []):
+            content = schedule_sonos._build_boot_reschedule_service(arg)
+            self.assertNotIn("Before=", content,
+                             f"Before= must be absent when schedule_names={arg!r}")
+
+    def test_boot_reschedule_service_written_on_first_install(self):
+        """flag-boot-reschedule.service must be written during a first-install run."""
+        import schedule_sonos
+
+        with patch("os.getuid", return_value=0), \
+             patch("schedule_sonos.load_config", return_value=_base_config()), \
+             patch("schedule_sonos._write_unit_file") as mock_write, \
+             patch("schedule_sonos._clean_stale_units"), \
+             patch("schedule_sonos.get_sunset_local_time", return_value=(19, 39)), \
+             patch("schedule_sonos._is_timer_enabled", return_value=False), \
+             patch("schedule_sonos._run_systemctl"):
+            schedule_sonos.main()
+
+        written_paths = [c.args[0] for c in mock_write.call_args_list]
+        boot_reschedule_path = "/etc/systemd/system/flag-boot-reschedule.service"
+        self.assertIn(boot_reschedule_path, written_paths,
+                      "flag-boot-reschedule.service must be written on first install")
+
+    def test_boot_reschedule_service_written_on_reschedule(self):
+        """flag-boot-reschedule.service must be written during a reschedule run."""
+        import schedule_sonos
+
+        with patch("os.getuid", return_value=0), \
+             patch("schedule_sonos.load_config", return_value=_base_config()), \
+             patch("schedule_sonos._write_unit_file") as mock_write, \
+             patch("schedule_sonos._clean_stale_units"), \
+             patch("schedule_sonos.get_sunset_local_time", return_value=(19, 39)), \
+             patch("schedule_sonos._is_timer_enabled", return_value=True), \
+             patch("schedule_sonos._run_systemctl"):
+            schedule_sonos.main()
+
+        written_paths = [c.args[0] for c in mock_write.call_args_list]
+        boot_reschedule_path = "/etc/systemd/system/flag-boot-reschedule.service"
+        self.assertIn(boot_reschedule_path, written_paths,
+                      "flag-boot-reschedule.service must be written on reschedule run")
+
+    def test_boot_reschedule_service_enabled_no_now_on_first_install(self):
+        """
+        On first install, flag-boot-reschedule.service must be enabled without
+        --now (it is a boot-time oneshot, not something to run immediately).
+        """
+        import schedule_sonos
+
+        with patch("os.getuid", return_value=0), \
+             patch("schedule_sonos.load_config", return_value=_base_config()), \
+             patch("schedule_sonos._write_unit_file"), \
+             patch("schedule_sonos._clean_stale_units"), \
+             patch("schedule_sonos.get_sunset_local_time", return_value=(19, 39)), \
+             patch("schedule_sonos._is_timer_enabled", return_value=False), \
+             patch("schedule_sonos._run_systemctl") as mock_ctl:
+            schedule_sonos.main()
+
+        calls = _systemctl_calls(mock_ctl)
+        # Must be enabled without --now
+        self.assertIn(("enable", "flag-boot-reschedule.service"), calls,
+                      "flag-boot-reschedule.service must be enabled on first install")
+        # Must NOT be started with --now
+        self.assertNotIn(("enable", "--now", "flag-boot-reschedule.service"), calls,
+                         "flag-boot-reschedule.service must not be started immediately")
+
+    def test_boot_reschedule_not_enabled_on_reschedule(self):
+        """
+        During a reschedule run, flag-boot-reschedule.service must not be
+        re-enabled (it is already enabled from the first-install run).
+        """
+        import schedule_sonos
+
+        with patch("os.getuid", return_value=0), \
+             patch("schedule_sonos.load_config", return_value=_base_config()), \
+             patch("schedule_sonos._write_unit_file"), \
+             patch("schedule_sonos._clean_stale_units"), \
+             patch("schedule_sonos.get_sunset_local_time", return_value=(19, 39)), \
+             patch("schedule_sonos._is_timer_enabled", return_value=True), \
+             patch("schedule_sonos._run_systemctl") as mock_ctl:
+            schedule_sonos.main()
+
+        calls = _systemctl_calls(mock_ctl)
+        boot_enables = [
+            c for c in calls
+            if "flag-boot-reschedule.service" in c and c[0] == "enable"
+        ]
+        self.assertEqual(boot_enables, [],
+                         "flag-boot-reschedule.service must not be re-enabled "
+                         "during a reschedule run")
