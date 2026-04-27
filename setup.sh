@@ -1740,14 +1740,14 @@ if [[ $# -gt 0 ]]; then
 
     case "$_CMD" in
         uninstall|--uninstall|-u)
-            uninstall_all $_YES_FLAG
+            uninstall_all "$_YES_FLAG"
             ;;
         --help|-h)
             _print_usage
             exit 0
             ;;
         *)
-            echo "Error: unrecognised argument '$_CMD'" >&2
+            echo "Error: unrecognized argument '$_CMD'" >&2
             echo "" >&2
             _print_usage >&2
             exit 1
