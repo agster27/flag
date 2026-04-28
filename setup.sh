@@ -916,7 +916,7 @@ function test_sonos_playback() {
             return
         fi
         IFS=',' read -ra _ips <<< "$_MANUAL_IPS"
-        SONOS_IPS_JSON=$(printf '%s\n' "${_ips[@]}" | sed '/^[[:space:]]*$/d' | tr -d ' ' | jq -R . | jq -s .)
+        SONOS_IPS_JSON=$(printf '%s\n' "${_ips[@]}" | sed '/^[[:space:]]*$/d' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R . | jq -s .)
     fi
 
     if [ "$(echo "$SONOS_IPS_JSON" | jq 'length')" -eq 0 ]; then
@@ -1197,8 +1197,12 @@ PYEOF
         fi
     done <<< "$_raw_ips"
 
-    _RESOLVED_SPEAKERS_DISPLAY=$(printf '%s, ' "${_parts[@]}")
-    _RESOLVED_SPEAKERS_DISPLAY="${_RESOLVED_SPEAKERS_DISPLAY%, }"
+    if [ "${#_parts[@]}" -eq 0 ]; then
+        _RESOLVED_SPEAKERS_DISPLAY=""
+    else
+        _RESOLVED_SPEAKERS_DISPLAY=$(printf '%s, ' "${_parts[@]}")
+        _RESOLVED_SPEAKERS_DISPLAY="${_RESOLVED_SPEAKERS_DISPLAY%, }"
+    fi
 }
 
 # ---------------------------------------------------------------------------
