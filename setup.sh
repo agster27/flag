@@ -8,7 +8,7 @@
 set -e
 set -o pipefail
 
-SETUP_VERSION="2.4.2"
+SETUP_VERSION="2.4.3"
 
 # Menu option numbers — single source of truth so messages never drift.
 readonly MENU_LIST=1
@@ -251,9 +251,16 @@ function discover_sonos_speakers() {
 import sys
 try:
     from soco.discovery import discover
-    devices = sorted(discover(timeout=5) or [], key=lambda d: d.player_name)
+    devices = discover(timeout=5) or []
+    results = []
     for d in devices:
-        print(f"{d.player_name}\t{d.ip_address}")
+        try:
+            results.append((d.player_name, d.ip_address))
+        except Exception as e:
+            ip = getattr(d, "ip_address", "?")
+            print(f"WARN: skipping unreachable peer {ip}: {e}", file=sys.stderr)
+    for name, ip in sorted(results):
+        print(f"{name}\t{ip}")
 except Exception as e:
     print(f"ERROR: {e}", file=sys.stderr)
 PYEOF
