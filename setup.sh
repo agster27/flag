@@ -10,6 +10,34 @@ set -o pipefail
 
 SETUP_VERSION="2.4.1"
 
+# Menu option numbers — single source of truth so messages never drift.
+readonly MENU_LIST=1
+readonly MENU_SUNSET=2
+readonly MENU_TEST=3
+readonly MENU_LOGS=4
+readonly MENU_INSTALL=5
+readonly MENU_UPGRADE=6
+readonly MENU_RECONFIG=7
+readonly MENU_UNINSTALL=8
+readonly MENU_EXIT=9
+
+# ---------------------------------------------------------------------------
+# Table of contents
+# ---------------------------------------------------------------------------
+#   Helpers:         maybe_sudo, log, cfg_default, _ensure_install_dir
+#   Service writer:  write_service_file
+#   Speaker picker:  _pick_speakers_for_test, discover_sonos_speakers
+#   Configuration:   configure_setup
+#   Sunset:          show_sunset_time, get_sunset_header_line
+#   Status:          test_sonos_playback, list_scheduled_plays, view_logs
+#   Install state:   detect_install_state, show_install_required_msg,
+#                    _require_install, _resolve_speaker_names
+#   Menu:            prompt_menu
+#   Lifecycle:       install_fresh, upgrade_scripts, uninstall_all
+#   CLI parsing:     _print_usage + arg dispatch
+#   Main loop:       (bottom of file)
+# ---------------------------------------------------------------------------
+
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"
 AUDIO_DIR="$INSTALL_DIR/audio"
@@ -25,6 +53,17 @@ CONFIG_FILE="$INSTALL_DIR/config.json"
 # lacks associative array support — the feature degrades to bare IPs.
 declare -A _SPEAKER_NAME_CACHE 2>/dev/null || true
 
+# Per-day cache for get_sunset_header_line — avoids a Python cold-start on
+# every menu render.  Both vars are set together; an empty _SUNSET_CACHE_DATE
+# means the cache is cold.
+_SUNSET_CACHE_DATE=""
+_SUNSET_CACHE_LINE=""
+
+# ---------------------------------------------------------------------------
+# Sudo wrapper: runs a command as root when the current user is not root,
+# no-ops (runs directly) when already root so 'sudo' is never invoked
+# unnecessarily during privileged CI or container runs.
+# ---------------------------------------------------------------------------
 function maybe_sudo() {
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
@@ -33,10 +72,22 @@ function maybe_sudo() {
     fi
 }
 
-maybe_sudo mkdir -p "$INSTALL_DIR"
-maybe_sudo chown "$(whoami)" "$INSTALL_DIR"
-touch "$LOG_FILE"
+# ---------------------------------------------------------------------------
+# Create $INSTALL_DIR if it does not exist and ensure the current user owns it.
+# Called only from install_fresh, upgrade_scripts, and the interactive menu
+# entry point — never from uninstall_all or the --help / --uninstall CLI paths.
+# ---------------------------------------------------------------------------
+function _ensure_install_dir() {
+    maybe_sudo mkdir -p "$INSTALL_DIR"
+    maybe_sudo chown "$(whoami)" "$INSTALL_DIR"
+}
 
+# ---------------------------------------------------------------------------
+# Logging helper: writes timestamped messages to both $LOG_FILE (appended)
+# and stdout via tee.  Falls back to stdout-only when $LOG_FILE's parent
+# directory does not exist or is not writable (e.g. before install_fresh has
+# created /opt/flag).
+# ---------------------------------------------------------------------------
 function log() {
     local _msg="[$(date +'%Y-%m-%d %H:%M:%S')] $*"
     if [[ -n "$LOG_FILE" && -d "$(dirname "$LOG_FILE")" && -w "$(dirname "$LOG_FILE")" ]]; then
@@ -54,7 +105,7 @@ function log() {
 function cfg_default() {
     local key="$1" fallback="$2"
     if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
-        val=$(jq -r ".${key} // empty" "$CONFIG_FILE" 2>/dev/null)
+        local val; val=$(jq -r ".${key} // empty" "$CONFIG_FILE" 2>/dev/null)
         echo "${val:-$fallback}"
     else
         echo "$fallback"
@@ -105,7 +156,8 @@ function _pick_speakers_for_test() {
     fi
     log "🔍 Scanning network for Sonos speakers..."
     # Use tab as delimiter to avoid conflicts with speaker names that may contain '|'
-    DISCOVERED=$("$VENV_DIR/bin/python" - <<'PYEOF'
+    DISCOVER_EXIT=0
+    DISCOVERED=$("$VENV_DIR/bin/python" - <<'PYEOF' 2>/dev/null
 import sys
 try:
     from soco.discovery import discover
@@ -115,9 +167,7 @@ try:
 except Exception as e:
     print(f"ERROR: {e}", file=sys.stderr)
 PYEOF
-)
-
-    DISCOVER_EXIT=$?
+) || DISCOVER_EXIT=$?
     if [ -z "$DISCOVERED" ]; then
         echo ""
         if [ $DISCOVER_EXIT -ne 0 ]; then
@@ -149,10 +199,7 @@ PYEOF
         read -rp "  Selection [0, 1-${COUNT}, comma-separated, or Enter for all discovered]: " SEL
         if [ -z "$SEL" ]; then
             # Select all discovered speakers
-            SONOS_IPS_JSON="[]"
-            for (( j=1; j<=COUNT; j++ )); do
-                SONOS_IPS_JSON=$(echo "$SONOS_IPS_JSON" | jq --arg ip "${_TEST_IPS[$j]}" '. + [$ip]')
-            done
+            SONOS_IPS_JSON=$(printf '%s\n' "${_TEST_IPS[@]:1:$COUNT}" | jq -R . | jq -s .)
             echo "  ✅ Selected all $COUNT discovered speaker(s)."
             return
         fi
@@ -251,10 +298,11 @@ PYEOF
         read -rp "  Selection [1-${COUNT}, comma-separated, or Enter for all]: " SEL
         if [ -z "$SEL" ]; then
             # Select all discovered speakers
-            SPEAKERS_JSON="[]"
-            for (( j=1; j<=COUNT; j++ )); do
-                SPEAKERS_JSON=$(echo "$SPEAKERS_JSON" | jq --arg ip "${DISC_IPS[$j]}" --arg name "${DISC_NAMES[$j]}" '. + [{ip: $ip, name: $name}]')
-            done
+            SPEAKERS_JSON=$(
+                for (( j=1; j<=COUNT; j++ )); do
+                    jq -n --arg ip "${DISC_IPS[$j]}" --arg name "${DISC_NAMES[$j]}" '{ip: $ip, name: $name}'
+                done | jq -s .
+            )
             echo "  ✅ Selected all $COUNT speaker(s)."
             return
         fi
@@ -407,7 +455,7 @@ function configure_setup() {
     else
         # Try first schedule's audio_url (new format) or legacy colors_url
         if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
-            _first_url=$(jq -r '(.schedules[0].audio_url // .colors_url // "") | select(. != "null")' \
+            _first_url=$(jq -r '.schedules[0].audio_url // .colors_url // ""' \
                 "$CONFIG_FILE" 2>/dev/null || echo "")
             if [ -n "$_first_url" ] && [ "$_first_url" != "null" ]; then
                 default_host=$(echo "$_first_url" | sed 's|http://||;s|:.*||')
@@ -469,7 +517,6 @@ function configure_setup() {
                 # the top-level default implicitly (keeps config clean).
                 _new_speakers_json=$(echo "$_new_speakers_json" | jq \
                     --argjson obj "$_spk_obj" \
-                    --argjson vol "$_spk_vol_input" \
                     '. + [$obj | del(.volume)]')
             else
                 # Volume differs from global — store explicit per-speaker override.
@@ -762,6 +809,14 @@ function get_sunset_header_line() {
     [ -d "$VENV_DIR" ] || return
     [ -f "$CONFIG_FILE" ] || return
 
+    # Return cached value if it was computed today.
+    local _today
+    _today=$(date +%Y-%m-%d)
+    if [ "$_SUNSET_CACHE_DATE" = "$_today" ]; then
+        SUNSET_HEADER_LINE="$_SUNSET_CACHE_LINE"
+        return
+    fi
+
     local _sunset_output
     _sunset_output=$(cd "$INSTALL_DIR" && "$VENV_DIR/bin/python" - <<'PYEOF' 2>/dev/null
 import sys
@@ -800,10 +855,20 @@ PYEOF
         _am=$(( _total % 60 ))
         SUNSET_HEADER_LINE=$(printf "  Sunset:  🌅 %s → Taps at %02d:%02d (offset: %d min)" "$_time" "$_ah" "$_am" "$_offset")
     fi
+
+    # Populate per-day cache.
+    _SUNSET_CACHE_DATE="$_today"
+    _SUNSET_CACHE_LINE="$SUNSET_HEADER_LINE"
 }
 
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Interactive speaker picker + one-shot playback test.
+# Calls _pick_speakers_for_test to let the user choose discovered or manual
+# speakers, then plays the first scheduled audio URL using sonos_play.py.
+# Falls back to manual IP entry when Sonos discovery finds nothing.
+# ---------------------------------------------------------------------------
 function test_sonos_playback() {
     echo ""
     echo "============================================"
@@ -850,14 +915,8 @@ function test_sonos_playback() {
             echo "  ⚠️  No IP provided. Aborting test."
             return
         fi
-        SONOS_IPS_JSON="[]"
         IFS=',' read -ra _ips <<< "$_MANUAL_IPS"
-        for _ip in "${_ips[@]}"; do
-            _ip="${_ip// /}"
-            if [ -n "$_ip" ]; then
-                SONOS_IPS_JSON=$(echo "$SONOS_IPS_JSON" | jq --arg ip "$_ip" '. + [$ip]')
-            fi
-        done
+        SONOS_IPS_JSON=$(printf '%s\n' "${_ips[@]}" | sed '/^[[:space:]]*$/d' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R . | jq -s .)
     fi
 
     if [ "$(echo "$SONOS_IPS_JSON" | jq 'length')" -eq 0 ]; then
@@ -907,6 +966,9 @@ function test_sonos_playback() {
 }
 
 function list_scheduled_plays() {
+    # Displays a formatted table of all configured schedules (name, audio file,
+    # time), the status of active systemd flag-*.timers, and whether the audio
+    # HTTP server (flag-audio-http) is running, installed-but-stopped, or absent.
     echo ""
     echo "============================================"
     echo "  Scheduled Plays                           "
@@ -950,7 +1012,7 @@ function list_scheduled_plays() {
     echo "  --- Audio HTTP Server ---"
     if systemctl is-active flag-audio-http &>/dev/null; then
         echo "  ✅ flag-audio-http is running"
-    elif systemctl list-unit-files flag-audio-http.service &>/dev/null 2>&1 | grep -q "flag-audio-http"; then
+    elif systemctl list-unit-files flag-audio-http.service 2>/dev/null | grep -q "flag-audio-http"; then
         echo "  ⛔ flag-audio-http is installed but not running"
     else
         echo "  ℹ️  flag-audio-http service not installed"
@@ -959,6 +1021,8 @@ function list_scheduled_plays() {
 }
 
 function view_logs() {
+    # Shows the last 20 lines of both setup.log and sonos_play.log side by side,
+    # each prefixed with a section heading so recent activity is easy to scan.
     echo ""
     echo "============================================"
     echo "  Recent Logs                               "
@@ -991,7 +1055,21 @@ function view_logs() {
 function show_install_required_msg() {
     echo ""
     echo "  ⚠️  This option requires a completed installation."
-    echo "  Please run \"Install\" first (option 5)."
+    echo "  Please run \"Install\" first (option ${MENU_INSTALL})."
+}
+
+# ---------------------------------------------------------------------------
+# Returns 0 if the installation is sufficient to run a feature, 1 otherwise.
+# When returning 1, prints the install-required message and waits for Enter.
+# ---------------------------------------------------------------------------
+function _require_install() {
+    if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
+        show_install_required_msg
+        echo ""
+        read -rp "  Press Enter to return to menu..." _pause
+        return 1
+    fi
+    return 0
 }
 
 function detect_install_state() {
@@ -1095,18 +1173,19 @@ PYEOF
         done
     fi
 
-    # Build display string from cache + per-speaker volume annotation
+    # Build display string from cache + per-speaker volume annotation.
+    # Build the IP→volume map once (single jq call) rather than once per speaker.
     local _global_vol
     _global_vol=$(jq -r '.volume // 30' "$_cfg" 2>/dev/null || echo 30)
+    declare -A _VOL_MAP
+    while IFS=$'\t' read -r _vmip _vmvol; do
+        [ -n "$_vmip" ] && _VOL_MAP["$_vmip"]="$_vmvol"
+    done < <(echo "$_speakers_json" | jq -r '.[] | [.ip, (if has("volume") then (.volume|tostring) else "" end)] | @tsv' 2>/dev/null || true)
+
     local _parts=()
     while IFS= read -r _ip; do
         local _name="${_SPEAKER_NAME_CACHE[$_ip]:-}"
-        # Per-speaker volume (if explicitly set in config)
-        local _spk_vol
-        _spk_vol=$(echo "$_speakers_json" | jq -r \
-            --arg ip "$_ip" \
-            '[.[] | select(.ip == $ip)] | first | if has("volume") then .volume | tostring else "" end' \
-            2>/dev/null || echo "")
+        local _spk_vol="${_VOL_MAP[$_ip]:-}"
         local _vol_annotation=""
         if [ -n "$_spk_vol" ]; then
             _vol_annotation=" @${_spk_vol}"
@@ -1118,10 +1197,19 @@ PYEOF
         fi
     done <<< "$_raw_ips"
 
-    local IFS=', '
-    _RESOLVED_SPEAKERS_DISPLAY="${_parts[*]}"
+    if [ "${#_parts[@]}" -eq 0 ]; then
+        _RESOLVED_SPEAKERS_DISPLAY=""
+    else
+        _RESOLVED_SPEAKERS_DISPLAY=$(printf '%s, ' "${_parts[@]}")
+        _RESOLVED_SPEAKERS_DISPLAY="${_RESOLVED_SPEAKERS_DISPLAY%, }"
+    fi
 }
 
+# ---------------------------------------------------------------------------
+# Renders the main interactive menu (header, status, config summary, sunset
+# line, and numbered option list).  Reads the user's choice into $CHOICE.
+# The caller is responsible for detecting install state before calling this.
+# ---------------------------------------------------------------------------
 function prompt_menu() {
     echo ""
     echo "============================================"
@@ -1203,6 +1291,16 @@ function prompt_menu() {
     read -rp "Enter your choice [1-9]: " CHOICE
 }
 
+# ---------------------------------------------------------------------------
+# Complete uninstall — removes all traces of the installation.  Accepts an
+# optional --yes / -y flag to skip the confirmation prompt (for scripted
+# teardown).  Five numbered phases:
+#   1. Systemd units   — disable + stop + remove flag-* and legacy sonos-* units
+#   2. Install dir     — rm -rf /opt/flag (sets LOG_FILE="" so log() falls back)
+#   3. Legacy dirs     — remove older install locations (/opt/sonos-flag, etc.)
+#   4. Cron entries    — purge matching entries from current-user and root crontabs
+#   5. setup.sh itself — removes the script if it lives outside INSTALL_DIR
+# ---------------------------------------------------------------------------
 function uninstall_all() {
     # Optional first argument: "--yes" or "-y" to skip confirmation prompt.
     local _skip_confirm=false
@@ -1314,7 +1412,7 @@ function uninstall_all() {
     # 4. Cron entries — remove any lines referencing flag-related scripts for
     #    both the current user and root.
     # -------------------------------------------------------------------------
-    local _cron_pattern='flag|sonos_play|schedule_sonos|colors\.mp3|taps\.mp3'
+    local _cron_pattern='/opt/flag|flag-(audio|colors|taps|reschedule)|sonos_play\.py|schedule_sonos\.py'
 
     # Current user crontab.
     if crontab -l 2>/dev/null | grep -qE "$_cron_pattern"; then
@@ -1362,7 +1460,18 @@ function uninstall_all() {
     exit 0
 }
 
+# ---------------------------------------------------------------------------
+# Full first-time installation.  Order of operations:
+#   1. _ensure_install_dir — create /opt/flag if absent
+#   2. System dependencies  — apt-get (python3-venv, ffmpeg, jq, wget)
+#   3. Download scripts     — GitHub API listing → wget each file
+#   4. Python venv          — python3 -m venv + pip install requirements
+#   5. Configuration wizard — configure_setup writes config.json
+#   6. Systemd service      — write_service_file + enable flag-audio-http
+#   7. Systemd timers       — schedule_sonos.py generates flag-*.timer units
+# ---------------------------------------------------------------------------
 function install_fresh() {
+    _ensure_install_dir
     log "🚀 Running setup.sh version $SETUP_VERSION"
     log "🔧 Setting up Sonos Scheduled Playback Environment..."
 
@@ -1475,15 +1584,26 @@ EOF
     log "  journalctl -u flag-taps -n 50"
     log ""
     log "Edit your config at any time: $INSTALL_DIR/config.json"
-    log "Or re-run this script and choose option 6 (Reconfigure)."
+    log "Or re-run this script and choose option ${MENU_RECONFIG} (Reconfigure)."
 }
 
+# ---------------------------------------------------------------------------
+# In-place upgrade — downloads the latest scripts from GitHub while
+# preserving config.json.  Order of operations:
+#   1. _ensure_install_dir — create /opt/flag if absent
+#   2. Download scripts    — GitHub API listing → wget (skip config.json)
+#   3. Whitelist cleanup   — remove top-level files not in the API listing
+#   4. Remove stale units  — flag-* timers/services no longer in config
+#   5. Pip upgrade         — pip install --upgrade -r requirements.txt
+#   6. Regenerate timers   — schedule_sonos.py rewrites flag-*.timer units
+# ---------------------------------------------------------------------------
 function upgrade_scripts() {
+    _ensure_install_dir
     log "🚀 Running setup.sh version $SETUP_VERSION — Upgrade"
 
     if [ ! -d "$VENV_DIR" ]; then
         log "⚠️  Installation not detected (no virtualenv at $VENV_DIR)."
-        log "    Please run Install (option 4) first."
+        log "    Please run Install (option ${MENU_INSTALL}) first."
         return
     fi
 
@@ -1529,19 +1649,13 @@ function upgrade_scripts() {
 
     # -------------------------------------------------------------------------
     # Whitelist-based cleanup — remove deprecated top-level files.
+    # Derived from the GitHub API listing (FILES) so new repo files are never
+    # accidentally deleted. Runtime-generated artifacts are also preserved.
     # Directories audio/ and sonos-env/ (and dotfiles) are always preserved.
     # -------------------------------------------------------------------------
-    local _whitelist=(
-        audio_check.py
-        config.json
-        config.py
-        requirements.txt
-        schedule_sonos.py
-        setup.sh
-        sonos_play.py
-        setup.log
-        sonos_play.log
-    )
+    local _whitelist=()
+    for _f in $FILES; do _whitelist+=("$_f"); done
+    _whitelist+=(setup.log sonos_play.log)
 
     local _deprecated_count=0
 
@@ -1763,67 +1877,44 @@ fi
 
 # ---------------------------------------------------------------------------
 
+_ensure_install_dir
+
 while true; do
     detect_install_state
     prompt_menu
     case $CHOICE in
-        1)
-            if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
-                show_install_required_msg
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            else
-                list_scheduled_plays
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            fi
+        "$MENU_LIST")
+            _require_install || continue
+            list_scheduled_plays
+            echo ""
+            read -rp "  Press Enter to return to menu..." _pause
             ;;
-        2)
-            if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
-                show_install_required_msg
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            else
-                show_sunset_time
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            fi
+        "$MENU_SUNSET")
+            _require_install || continue
+            show_sunset_time
+            echo ""
+            read -rp "  Press Enter to return to menu..." _pause
             ;;
-        3)
-            if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
-                show_install_required_msg
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            else
-                test_sonos_playback
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            fi
+        "$MENU_TEST")
+            _require_install || continue
+            test_sonos_playback
+            echo ""
+            read -rp "  Press Enter to return to menu..." _pause
             ;;
-        4)
-            if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
-                show_install_required_msg
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            else
-                view_logs
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            fi
+        "$MENU_LOGS")
+            _require_install || continue
+            view_logs
+            echo ""
+            read -rp "  Press Enter to return to menu..." _pause
             ;;
-        5)
+        "$MENU_INSTALL")
             install_fresh
             ;;
-        6)
-            if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
-                show_install_required_msg
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            else
-                upgrade_scripts
-            fi
+        "$MENU_UPGRADE")
+            _require_install || continue
+            upgrade_scripts
             ;;
-        7)
+        "$MENU_RECONFIG")
             if [ "$INSTALL_STATE" = "none" ]; then
                 show_install_required_msg
             else
@@ -1838,12 +1929,12 @@ while true; do
                     log "🗓️  Regenerating systemd timer units..."
                     maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
                 else
-                    log "⚠️  Python venv not found. Run option 5 (Install) to create systemd timers."
+                    log "⚠️  Python venv not found. Run option ${MENU_INSTALL} (Install) to create systemd timers."
                 fi
                 log "✅ Reconfiguration complete."
             fi
             ;;
-        8)
+        "$MENU_UNINSTALL")
             uninstall_all
             ;;
         *)
