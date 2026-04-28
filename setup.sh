@@ -1040,7 +1040,7 @@ function list_scheduled_plays() {
 # ---------------------------------------------------------------------------
 function _msp_valid_time() {
     local _t="$1"
-    if [[ "$_t" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then return 0; fi
+    if [[ "$_t" =~ ^(0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]$ ]]; then return 0; fi
     if [[ "$_t" == "sunset" ]]; then return 0; fi
     if [[ "$_t" =~ ^sunset[+-][0-9]+min$ ]]; then
         local _n
@@ -1174,7 +1174,7 @@ function manage_scheduled_plays() {
                     read -rp "  Schedule name [${_stem}]: " _new_name
                     _new_name="${_new_name:-$_stem}"
                     if [[ ! "$_new_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-                        echo "  ⚠️  Name must match [a-zA-Z0-9_-] and be non-empty."
+                        echo "  ⚠️  Name must contain only letters, numbers, underscores, and hyphens."
                         continue
                     fi
                     local _dup=false
@@ -1304,12 +1304,12 @@ function manage_scheduled_plays() {
                 fi
                 # Build the updated SCHEDULES_JSON array
                 local _SAVE_JSON="[]"
-                for (( i=0; i<_scount; i++ )); do
-                    local _audio_url="http://${_save_host}:${_save_port}/${_sfiles[$i]}"
+                for (( _i=0; _i<_scount; _i++ )); do
+                    local _audio_url="http://${_save_host}:${_save_port}/${_sfiles[$_i]}"
                     _SAVE_JSON=$(printf '%s' "$_SAVE_JSON" | jq \
-                        --arg name  "${_snames[$i]}" \
+                        --arg name  "${_snames[$_i]}" \
                         --arg url   "$_audio_url" \
-                        --arg time  "${_stimes[$i]}" \
+                        --arg time  "${_stimes[$_i]}" \
                         '. + [{"name": $name, "audio_url": $url, "time": $time}]')
                 done
                 # Atomically update only .schedules — leave all other config keys intact
