@@ -62,6 +62,42 @@ function cfg_default() {
 }
 
 # ---------------------------------------------------------------------------
+# Validate that $1 (default: $CONFIG_FILE) is a readable, valid JSON file.
+# Prints a human-friendly error to stderr and returns non-zero on failure.
+# ---------------------------------------------------------------------------
+function validate_config_json() {
+    local cfg="${1:-$CONFIG_FILE}"
+    if [[ ! -f "$cfg" ]]; then
+        echo "❌ Config file not found: $cfg" >&2
+        return 1
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "❌ 'jq' is required but not installed." >&2
+        return 1
+    fi
+    local err
+    if ! err=$(jq empty "$cfg" 2>&1); then
+        echo "❌ Invalid JSON in $cfg:" >&2
+        echo "   $err" >&2
+        echo "   Tip: run 'jq . $cfg' to see the exact line/column." >&2
+        return 1
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Convenience wrapper used by menu options: validates $CONFIG_FILE, prints
+# indented diagnostic output to stdout, and on failure also prints a
+# "see error above / run Reconfigure" hint.  Returns non-zero when invalid.
+# ---------------------------------------------------------------------------
+function _check_config_json() {
+    if ! validate_config_json "$CONFIG_FILE" 2>&1 | sed 's/^/  /'; then
+        echo "  ⚠️  config.json is invalid JSON — see error above. Fix it or run option 7 (Reconfigure)."
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Write (or rewrite) the systemd service file for the audio HTTP server.
 # Uses the current $PORT value.
 # ---------------------------------------------------------------------------
@@ -696,6 +732,9 @@ function show_sunset_time() {
         echo "  ⚠️  config.json not found. Please run Install or Reconfigure first."
         return
     fi
+    if ! _check_config_json; then
+        return
+    fi
 
     local _sunset_output
     _sunset_output=$(cd "$INSTALL_DIR" && "$VENV_DIR/bin/python" - <<'PYEOF' 2>/tmp/sunset_stderr
@@ -818,6 +857,9 @@ function test_sonos_playback() {
         echo "  ⚠️  config.json not found. Please run Install or Reconfigure first."
         return
     fi
+    if ! _check_config_json; then
+        return
+    fi
 
     _pick_speakers_for_test
 
@@ -918,6 +960,9 @@ function list_scheduled_plays() {
     fi
     if ! command -v jq &>/dev/null; then
         echo "  ⚠️  'jq' not found. Cannot parse config.json."
+        return
+    fi
+    if ! _check_config_json; then
         return
     fi
 
@@ -1134,7 +1179,15 @@ function prompt_menu() {
         echo "  Status:  ⚙️  Not installed"
     fi
 
-    if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "  Config:  ⚠️  config.json not found"
+    elif ! command -v jq &>/dev/null; then
+        echo "  Config:  ⚠️  'jq' not installed — cannot read config.json"
+    elif ! _json_err=$(validate_config_json "$CONFIG_FILE" 2>&1); then
+        echo "  Config:  ⚠️  invalid JSON in $CONFIG_FILE"
+        echo "$_json_err" | sed 's/^/           /'
+        echo "           Fix it with 'jq . $CONFIG_FILE' or run option 7 (Reconfigure)."
+    else
         _speaker_count=$(jq '.speakers | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
         _resolve_speaker_names "$CONFIG_FILE"
         _speakers_display="$_RESOLVED_SPEAKERS_DISPLAY"
