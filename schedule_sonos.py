@@ -42,7 +42,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 from astral import LocationInfo
 from astral.sun import sun
@@ -595,8 +595,10 @@ def _is_reschedule_run(schedule_names):
     a stop+reload cycle.  Leaving the timer active and relying on ``daemon-reload``
     re-arming is the correct fix.
 
-    Fixed-time timers are restarted normally (their ``OnCalendar``, e.g. 08:00, has
-    not elapsed at the 02:00 reschedule time, so a restart is safe).
+    Fixed-time timers are restarted only when their unit file changed AND their
+    ``OnCalendar`` fire time has not yet elapsed today.  When the fire time has
+    already passed, ``daemon-reload`` alone re-arms the active timer for tomorrow
+    without triggering a spurious immediate play.
     ``flag-reschedule.timer`` is never restarted (to avoid the self-referential
     restart that triggers a catch-up fire at 02:00).
 
@@ -688,16 +690,17 @@ def main():
     9. Run ``systemctl daemon-reload``; print a clear error and exit on failure.
     10. Activate timers:
 
-       - **Reschedule run**: restart fixed-time timers normally.  Sunset timers
-         are left active — ``daemon-reload`` re-arms an already-active timer
-         with the new ``OnCalendar`` value automatically, so no ``stop``/``start``
-         is required.  (The previous PR #43 approach of stop→write→reload→start
-         caused the timer to fire immediately after ``systemctl start``, even with
-         ``Persistent=false``, due to systemd's next-elapse recalculation after a
-         stop+reload cycle.)  ``flag-reschedule.timer`` is also skipped — it is
-         always hardcoded to 02:00 and restarting your own parent timer at the
-         exact ``OnCalendar`` time can cause systemd to treat the just-elapsed
-         event as "missed" and fire again.
+       - **Reschedule run**: fixed-time timers are restarted only when their
+         unit file changed AND their ``OnCalendar`` fire time has not yet
+         elapsed today.  If the fire time has already passed, ``daemon-reload``
+         alone re-arms the active timer for tomorrow — restarting would trigger
+         the same systemd misfire bug (PR #43) that affects sunset timers.
+         Sunset timers are always left active — ``daemon-reload`` re-arms an
+         already-active timer with the new ``OnCalendar`` value automatically,
+         so no ``stop``/``start`` is required.  ``flag-reschedule.timer`` is
+         also skipped — it is always hardcoded to 02:00 and restarting your
+         own parent timer at the exact ``OnCalendar`` time can cause systemd
+         to treat the just-elapsed event as "missed" and fire again.
        - **First-install run**: run ``systemctl enable --now`` for all timers
          including ``flag-reschedule.timer``, and ``systemctl enable`` (no
          ``--now``) for ``flag-boot-reschedule.service``.
@@ -796,9 +799,12 @@ def main():
     # any_file_written: True if any unit file was actually written this run.
     # Used to decide whether daemon-reload is needed.
     any_file_written: bool = False
-    # Maps schedule name → (hour, minute) for sunset-based timers so that the
+    # Maps schedule name → (hour, minute) for ALL timers so that the
     # activation step can compare against the current time.
-    sunset_times: dict[str, tuple[int, int]] = {}
+    all_times: dict[str, tuple[int, int]] = {}
+    # sunset_names: set of schedule names that are sunset-based, used to
+    # branch in the activation loop.
+    sunset_names: set[str] = set()
     for entry in processed:
         name = entry["name"]
         audio_url = entry["audio_url"]
@@ -900,8 +906,9 @@ def main():
             changed_units.add(name)
 
         written_names.add(name)
+        all_times[name] = (hour, minute)
         if is_sunset_based:
-            sunset_times[name] = (hour, minute)
+            sunset_names.add(name)
         time_display = (
             f"{time_str} → {hour:02d}:{minute:02d} {tz_name}" if is_sunset_based
             else f"{time_str} {tz_name}"
@@ -976,10 +983,10 @@ def main():
         # daemon-reload re-arming is the correct fix.
         for name in sorted(written_names):
             timer_name = f"flag-{name}.timer"
-            if name in sunset_times:
+            if name in sunset_names:
                 # Sunset timer: already-active timer re-armed by daemon-reload.
                 # Do NOT stop/start — that would cause spurious immediate fire.
-                sun_hour, sun_minute = sunset_times[name]
+                sun_hour, sun_minute = all_times[name]
                 if name in changed_units:
                     _log.info(
                         "  ✅ %s: unit updated (OnCalendar=%02d:%02d); "
@@ -994,12 +1001,38 @@ def main():
                     _log.info("  %s: unchanged, no action needed", timer_name)
                     print(f"  ✅ {timer_name}: unchanged, no action needed")
             else:
-                # Fixed-time timer: safe to restart when OnCalendar (e.g. 08:00)
-                # has not yet elapsed at the 02:00 reschedule time, BUT only
-                # restart if the unit file actually changed.  An unchanged unit
-                # file means the stamp is still valid — restarting would clear it.
-                if name in changed_units:
-                    _log.info("Restarting %s (fixed-time timer)", timer_name)
+                # Fixed-time timer: only restart if the unit file changed AND
+                # the fire time has not yet elapsed today.  Restarting a timer
+                # whose OnCalendar time has already passed today triggers the
+                # same systemd misfire bug (PR #43) that affects sunset timers —
+                # systemd treats the elapsed event as missed and fires immediately,
+                # even with Persistent=false.  When the fire time has already
+                # elapsed, daemon-reload alone re-arms the active timer for
+                # tomorrow's fire time without any spurious play.
+                hour, minute = all_times[name]
+                tz_obj = pytz.timezone(tz_name)
+                now_local = datetime.now(tz_obj).time()
+                fire_time = time(hour, minute)
+                already_elapsed_today = now_local >= fire_time
+
+                if name not in changed_units:
+                    _log.info("%s: unit file unchanged, skipping restart", timer_name)
+                    print(f"  ✅ {timer_name}: unit file unchanged, skipping restart")
+                elif already_elapsed_today:
+                    _log.info(
+                        "  ✅ %s: unit updated (OnCalendar=%02d:%02d); fire time already "
+                        "elapsed today, daemon-reload re-armed timer for tomorrow",
+                        timer_name, hour, minute,
+                    )
+                    print(
+                        f"  ✅ {timer_name}: unit updated (OnCalendar={hour:02d}:{minute:02d}); "
+                        f"fire time already elapsed today, re-armed for tomorrow by daemon-reload"
+                    )
+                else:
+                    _log.info(
+                        "Restarting %s (fixed-time timer, fire time still in future today)",
+                        timer_name,
+                    )
                     try:
                         _run_systemctl("restart", timer_name)
                         print(f"  ✅ Restarted (already enabled): {timer_name}")
@@ -1007,9 +1040,6 @@ def main():
                     except RuntimeError as exc:
                         print(f"  ⚠️  Could not restart {timer_name}: {exc}")
                         _log.error("Could not restart %s: %s", timer_name, exc)
-                else:
-                    _log.info("%s: unit file unchanged, skipping restart", timer_name)
-                    print(f"  ✅ {timer_name}: unit file unchanged, skipping restart")
 
         # Skip flag-reschedule.timer — it is hardcoded to 02:00 and never
         # changes, so there is nothing to update.  Restarting your own parent
