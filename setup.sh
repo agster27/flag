@@ -122,7 +122,8 @@ function _pick_speakers_for_test() {
     fi
     log "🔍 Scanning network for Sonos speakers..."
     # Use tab as delimiter to avoid conflicts with speaker names that may contain '|'
-    DISCOVERED=$("$VENV_DIR/bin/python" - <<'PYEOF'
+    DISCOVER_EXIT=0
+    DISCOVERED=$("$VENV_DIR/bin/python" - <<'PYEOF' 2>/dev/null
 import sys
 try:
     from soco.discovery import discover
@@ -132,9 +133,7 @@ try:
 except Exception as e:
     print(f"ERROR: {e}", file=sys.stderr)
 PYEOF
-)
-
-    DISCOVER_EXIT=$?
+) || DISCOVER_EXIT=$?
     if [ -z "$DISCOVERED" ]; then
         echo ""
         if [ $DISCOVER_EXIT -ne 0 ]; then
@@ -1135,8 +1134,8 @@ PYEOF
         fi
     done <<< "$_raw_ips"
 
-    local IFS=', '
-    _RESOLVED_SPEAKERS_DISPLAY="${_parts[*]}"
+    _RESOLVED_SPEAKERS_DISPLAY=$(printf '%s, ' "${_parts[@]}")
+    _RESOLVED_SPEAKERS_DISPLAY="${_RESOLVED_SPEAKERS_DISPLAY%, }"
 }
 
 function prompt_menu() {
@@ -1331,7 +1330,7 @@ function uninstall_all() {
     # 4. Cron entries — remove any lines referencing flag-related scripts for
     #    both the current user and root.
     # -------------------------------------------------------------------------
-    local _cron_pattern='flag|sonos_play|schedule_sonos|colors\.mp3|taps\.mp3'
+    local _cron_pattern='/opt/flag|flag-(audio|colors|taps|reschedule)|sonos_play\.py|schedule_sonos\.py'
 
     # Current user crontab.
     if crontab -l 2>/dev/null | grep -qE "$_cron_pattern"; then
