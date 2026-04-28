@@ -825,3 +825,84 @@ class TestSunsetOffsetDecouplingAndWrap(unittest.TestCase):
                          "Wrap entry must be skipped (not enabled)")
         self.assertIn("flag-fixed-entry.timer", enabled_units,
                       "Valid fixed-time entry must still be processed")
+
+
+# ---------------------------------------------------------------------------
+# Bug 5: _build_service_unit escapes audio_url with shlex.quote
+# ---------------------------------------------------------------------------
+
+class TestBuildServiceUnitEscapesAudioUrl(unittest.TestCase):
+    """_build_service_unit uses shlex.quote so special characters in URLs are safe."""
+
+    def test_build_service_unit_escapes_audio_url_with_quote(self):
+        """URL containing double-quotes is shell-safe after shlex.quote."""
+        import shlex
+        import schedule_sonos
+
+        url_with_quotes = 'http://example.com/taps.mp3?a="b"'
+        content = schedule_sonos._build_service_unit("taps", url_with_quotes)
+
+        # Extract the ExecStart line
+        exec_line = [ln for ln in content.splitlines() if ln.startswith("ExecStart=")][0]
+        exec_value = exec_line[len("ExecStart="):]
+
+        # shlex.split must not raise and must include the URL as one token
+        tokens = shlex.split(exec_value)
+        self.assertIn(url_with_quotes, tokens,
+                      "The unescaped URL must appear as a single token after shlex.split")
+
+    def test_build_service_unit_normal_url_still_parseable(self):
+        """A normal URL is still correctly round-tripped through shlex.split."""
+        import shlex
+        import schedule_sonos
+
+        url = "http://example.com/colors.mp3"
+        content = schedule_sonos._build_service_unit("colors", url)
+
+        exec_line = [ln for ln in content.splitlines() if ln.startswith("ExecStart=")][0]
+        exec_value = exec_line[len("ExecStart="):]
+        tokens = shlex.split(exec_value)
+        self.assertIn(url, tokens, "Plain URL must appear as a single token")
+
+
+# ---------------------------------------------------------------------------
+# Bug 6: resolve_schedules rejects non-list / null schedules
+# ---------------------------------------------------------------------------
+
+class TestResolveSchedulesValidation(unittest.TestCase):
+    """resolve_schedules returns [] when 'schedules' is present but not a non-empty list."""
+
+    def _resolve(self, schedules_value):
+        import schedule_sonos
+        return schedule_sonos.resolve_schedules({"schedules": schedules_value})
+
+    def test_resolve_schedules_rejects_non_list_schedules(self):
+        """'schedules' that is a string (not a list) returns []."""
+        result = self._resolve("not-a-list")
+        self.assertEqual(result, [],
+                          "Non-list schedules value must return empty list")
+
+    def test_resolve_schedules_rejects_null_schedules(self):
+        """'schedules' that is None (null) returns []."""
+        result = self._resolve(None)
+        self.assertEqual(result, [],
+                          "Null schedules value must return empty list")
+
+    def test_resolve_schedules_rejects_empty_list(self):
+        """'schedules' that is an empty list returns []."""
+        result = self._resolve([])
+        self.assertEqual(result, [],
+                          "Empty schedules list must return empty list")
+
+    def test_resolve_schedules_accepts_valid_list(self):
+        """'schedules' that is a non-empty list is returned as-is."""
+        entry = {"name": "taps", "time": "sunset", "audio_url": "http://example.com/t.mp3"}
+        result = self._resolve([entry])
+        self.assertEqual(result, [entry],
+                          "Valid non-empty schedules list must be returned unchanged")
+
+    def test_resolve_schedules_rejects_dict_schedules(self):
+        """'schedules' that is a dict (not a list) returns []."""
+        result = self._resolve({"name": "taps"})
+        self.assertEqual(result, [],
+                          "Dict schedules value must return empty list")

@@ -56,11 +56,15 @@ other speakers to coordinate with.
 #   [ ] Each speaker's original volume is restored after playback.
 # =============================================================================
 import argparse
+import logging
 import os
+import shutil
+import socket
 import sys
 import soco
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 from mutagen.mp3 import MP3
@@ -72,16 +76,19 @@ try:
 except ImportError:
     SoCoSlaveException = None
 
+_log = logging.getLogger(__name__)
+
 
 def log(message):
     """
     Append a timestamped message to the log file.
 
+    This is a thin compatibility shim; new code should use ``_log`` directly.
+
     Args:
         message (str): The message to log.
     """
-    with open(LOG_FILE, "a") as f:
-        f.write(f"{datetime.now().isoformat()} - {message}\n")
+    _log.info(message)
 
 
 def get_mp3_duration(url, default_wait):
@@ -102,13 +109,19 @@ def get_mp3_duration(url, default_wait):
     temp_file = tmp.name
     tmp.close()
     try:
-        urllib.request.urlretrieve(url, temp_file)
+        try:
+            with urllib.request.urlopen(url, timeout=15) as response:
+                with open(temp_file, "wb") as f:
+                    shutil.copyfileobj(response, f)
+        except (socket.timeout, urllib.error.URLError) as e:
+            _log.warning("Could not download audio for duration check. Defaulting to %d sec. Error: %s", default_wait, e)
+            return default_wait
         audio = MP3(temp_file)
         duration = int(audio.info.length)
-        log(f"INFO: MP3 duration is {duration} seconds")
+        _log.info("MP3 duration is %d seconds", duration)
         return duration
     except Exception as e:
-        log(f"WARNING: Could not get duration. Defaulting to {default_wait} sec. Error: {e}")
+        _log.warning("Could not get duration. Defaulting to %d sec. Error: %s", default_wait, e)
         return default_wait
     finally:
         if os.path.exists(temp_file):
@@ -185,7 +198,14 @@ def main():
         )
 
     skip_restore_if_idle = config.get("skip_restore_if_idle", True)
-    default_wait = config.get("default_wait_seconds", 60)
+    try:
+        default_wait = int(config.get("default_wait_seconds", 60))
+        if not (0 < default_wait <= 3600):
+            log(f"WARNING: 'default_wait_seconds' {default_wait!r} is out of range (must be 1–3600); using 60.")
+            default_wait = 60
+    except (TypeError, ValueError):
+        log(f"WARNING: 'default_wait_seconds' {config.get('default_wait_seconds')!r} is not a valid integer; using 60.")
+        default_wait = 60
 
     # --- Validate audio_url argument ---
     audio_url = args.audio_url
@@ -231,6 +251,7 @@ def main():
             pre_bugle_volumes[sp.uid] = sp.volume
             group_coord = sp.group.coordinator
             uid = group_coord.uid
+            # Snapshot the *coordinator only* of each pre-existing group — restoring the coordinator restores the whole group.
             if uid not in pre_existing_groups:
                 state = group_coord.get_current_transport_info()["current_transport_state"]
                 was_playing = state == "PLAYING"
@@ -291,12 +312,15 @@ def main():
         # =====================================================================
         # Phase 4: Play
         # =====================================================================
-        bugle_coordinator.play_uri(audio_url)
-        log(f"SUCCESS: Playing {audio_url} on {bugle_coordinator.player_name} (and group members)")
-
+        # Fetch duration *before* play_uri so we don't touch the bugle group
+        # if the URL is unreachable, and avoid a redundant HTTP round-trip.
         print("  ⏳ Fetching audio duration...")
         duration = get_mp3_duration(audio_url, default_wait)
         wait_secs = duration + 1
+
+        bugle_coordinator.play_uri(audio_url)
+        log(f"SUCCESS: Playing {audio_url} on {bugle_coordinator.player_name} (and group members)")
+
         log(f"INFO: Waiting {wait_secs} seconds for playback to finish")
         print(f"  ▶️  Playing — waiting ~{wait_secs} seconds for playback to finish...")
         time.sleep(wait_secs)

@@ -1,4 +1,4 @@
-astral
-soco
-mutagen
-pytz
+astral>=3.2
+soco>=0.30
+mutagen>=1.46
+pytz>=2023.3

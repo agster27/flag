@@ -5,6 +5,11 @@ audio_check.py — Validates and converts audio files for Sonos compatibility.
 Checks that MP3 files in the audio directory meet Sonos requirements
 (stereo, 44.1 kHz or 48 kHz). Incompatible files are automatically
 converted using ffmpeg.
+
+.. warning::
+    Conversion is performed **in place** — the original file is replaced with
+    no backup.  Ensure you have a copy elsewhere before running this script if
+    the originals are irreplaceable.
 """
 
 import logging
@@ -48,7 +53,9 @@ def convert_to_mp3(filepath):
     """
     Convert an audio file to a Sonos-compatible stereo MP3 at 44.1 kHz.
 
-    The converted file replaces the original at the same path.
+    **The original file is replaced in place** — there is no backup.  The
+    converted output is written to a temporary path first and then atomically
+    renamed over the original.
 
     Args:
         filepath (str): Path to the file to convert.
@@ -70,7 +77,18 @@ def convert_to_mp3(filepath):
             "ffmpeg", "-y", "-i", filepath,
             "-ar", "44100", "-ac", "2", "-codec:a", "libmp3lame", temp_path
         ], check=True)
-        os.replace(temp_path, filepath)
+        try:
+            os.replace(temp_path, filepath)
+        except OSError as replace_err:
+            msg = f"❌ Failed to replace {filepath} after conversion: {replace_err}"
+            print(msg)
+            _log.error(msg)
+            return False
+        finally:
+            # On success, temp_path was atomically renamed so exists() returns False.
+            # On failure (OSError above), temp_path still exists and must be cleaned up.
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
         _output(f"✅ Successfully converted {filepath}")
         return True
     except subprocess.CalledProcessError:
