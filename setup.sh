@@ -77,7 +77,7 @@ function log() {
 function cfg_default() {
     local key="$1" fallback="$2"
     if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
-        val=$(jq -r ".${key} // empty" "$CONFIG_FILE" 2>/dev/null)
+        local val; val=$(jq -r ".${key} // empty" "$CONFIG_FILE" 2>/dev/null)
         echo "${val:-$fallback}"
     else
         echo "$fallback"
@@ -427,7 +427,7 @@ function configure_setup() {
     else
         # Try first schedule's audio_url (new format) or legacy colors_url
         if [ -f "$CONFIG_FILE" ] && command -v jq &>/dev/null; then
-            _first_url=$(jq -r '(.schedules[0].audio_url // .colors_url // "") | select(. != "null")' \
+            _first_url=$(jq -r '.schedules[0].audio_url // .colors_url // ""' \
                 "$CONFIG_FILE" 2>/dev/null || echo "")
             if [ -n "$_first_url" ] && [ "$_first_url" != "null" ]; then
                 default_host=$(echo "$_first_url" | sed 's|http://||;s|:.*||')
@@ -489,7 +489,6 @@ function configure_setup() {
                 # the top-level default implicitly (keeps config clean).
                 _new_speakers_json=$(echo "$_new_speakers_json" | jq \
                     --argjson obj "$_spk_obj" \
-                    --argjson vol "$_spk_vol_input" \
                     '. + [$obj | del(.volume)]')
             else
                 # Volume differs from global — store explicit per-speaker override.
@@ -1017,7 +1016,21 @@ function view_logs() {
 function show_install_required_msg() {
     echo ""
     echo "  ⚠️  This option requires a completed installation."
-    echo "  Please run \"Install\" first (option 5)."
+    echo "  Please run \"Install\" first (option ${MENU_INSTALL})."
+}
+
+# ---------------------------------------------------------------------------
+# Returns 0 if the installation is sufficient to run a feature, 1 otherwise.
+# When returning 1, prints the install-required message and waits for Enter.
+# ---------------------------------------------------------------------------
+function _require_install() {
+    if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
+        show_install_required_msg
+        echo ""
+        read -rp "  Press Enter to return to menu..." _pause
+        return 1
+    fi
+    return 0
 }
 
 function detect_install_state() {
@@ -1793,60 +1806,35 @@ while true; do
     prompt_menu
     case $CHOICE in
         "$MENU_LIST")
-            if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
-                show_install_required_msg
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            else
-                list_scheduled_plays
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            fi
+            _require_install || continue
+            list_scheduled_plays
+            echo ""
+            read -rp "  Press Enter to return to menu..." _pause
             ;;
         "$MENU_SUNSET")
-            if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
-                show_install_required_msg
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            else
-                show_sunset_time
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            fi
+            _require_install || continue
+            show_sunset_time
+            echo ""
+            read -rp "  Press Enter to return to menu..." _pause
             ;;
         "$MENU_TEST")
-            if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
-                show_install_required_msg
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            else
-                test_sonos_playback
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            fi
+            _require_install || continue
+            test_sonos_playback
+            echo ""
+            read -rp "  Press Enter to return to menu..." _pause
             ;;
         "$MENU_LOGS")
-            if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
-                show_install_required_msg
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            else
-                view_logs
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            fi
+            _require_install || continue
+            view_logs
+            echo ""
+            read -rp "  Press Enter to return to menu..." _pause
             ;;
         "$MENU_INSTALL")
             install_fresh
             ;;
         "$MENU_UPGRADE")
-            if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
-                show_install_required_msg
-                echo ""
-                read -rp "  Press Enter to return to menu..." _pause
-            else
-                upgrade_scripts
-            fi
+            _require_install || continue
+            upgrade_scripts
             ;;
         "$MENU_RECONFIG")
             if [ "$INSTALL_STATE" = "none" ]; then
