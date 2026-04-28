@@ -85,6 +85,8 @@ def convert_to_mp3(filepath):
             _log.error(msg)
             return False
         finally:
+            # On success, temp_path was atomically renamed so exists() returns False.
+            # On failure (OSError above), temp_path still exists and must be cleaned up.
             if os.path.exists(temp_path):
                 os.remove(temp_path)
         _output(f"✅ Successfully converted {filepath}")

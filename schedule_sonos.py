@@ -752,8 +752,8 @@ def main():
         if not audio_url:
             print(f"  ⚠️  Skipping '{name}': missing required 'audio_url' field in schedule entry.")
             continue
-        if not isinstance(audio_url, str) or (
-            not audio_url.startswith("http://") and not audio_url.startswith("https://")
+        if not isinstance(audio_url, str) or not (
+            audio_url.startswith("http://") or audio_url.startswith("https://")
         ):
             _log.warning("Skipping '%s': audio_url %r is not a valid http/https URL.", name, audio_url)
             print(f"  ⚠️  Skipping '{name}': audio_url must start with http:// or https://.")
