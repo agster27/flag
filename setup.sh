@@ -10,6 +10,17 @@ set -o pipefail
 
 SETUP_VERSION="2.4.1"
 
+# Menu option numbers — single source of truth so messages never drift.
+readonly MENU_LIST=1
+readonly MENU_SUNSET=2
+readonly MENU_TEST=3
+readonly MENU_LOGS=4
+readonly MENU_INSTALL=5
+readonly MENU_UPGRADE=6
+readonly MENU_RECONFIG=7
+readonly MENU_UNINSTALL=8
+readonly MENU_EXIT=9
+
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"
 AUDIO_DIR="$INSTALL_DIR/audio"
@@ -33,9 +44,15 @@ function maybe_sudo() {
     fi
 }
 
-maybe_sudo mkdir -p "$INSTALL_DIR"
-maybe_sudo chown "$(whoami)" "$INSTALL_DIR"
-touch "$LOG_FILE"
+# ---------------------------------------------------------------------------
+# Create $INSTALL_DIR if it does not exist and ensure the current user owns it.
+# Called only from install_fresh, upgrade_scripts, and the interactive menu
+# entry point — never from uninstall_all or the --help / --uninstall CLI paths.
+# ---------------------------------------------------------------------------
+function _ensure_install_dir() {
+    maybe_sudo mkdir -p "$INSTALL_DIR"
+    maybe_sudo chown "$(whoami)" "$INSTALL_DIR"
+}
 
 function log() {
     local _msg="[$(date +'%Y-%m-%d %H:%M:%S')] $*"
@@ -950,7 +967,7 @@ function list_scheduled_plays() {
     echo "  --- Audio HTTP Server ---"
     if systemctl is-active flag-audio-http &>/dev/null; then
         echo "  ✅ flag-audio-http is running"
-    elif systemctl list-unit-files flag-audio-http.service &>/dev/null 2>&1 | grep -q "flag-audio-http"; then
+    elif systemctl list-unit-files flag-audio-http.service 2>/dev/null | grep -q "flag-audio-http"; then
         echo "  ⛔ flag-audio-http is installed but not running"
     else
         echo "  ℹ️  flag-audio-http service not installed"
@@ -1363,6 +1380,7 @@ function uninstall_all() {
 }
 
 function install_fresh() {
+    _ensure_install_dir
     log "🚀 Running setup.sh version $SETUP_VERSION"
     log "🔧 Setting up Sonos Scheduled Playback Environment..."
 
@@ -1475,15 +1493,16 @@ EOF
     log "  journalctl -u flag-taps -n 50"
     log ""
     log "Edit your config at any time: $INSTALL_DIR/config.json"
-    log "Or re-run this script and choose option 6 (Reconfigure)."
+    log "Or re-run this script and choose option ${MENU_RECONFIG} (Reconfigure)."
 }
 
 function upgrade_scripts() {
+    _ensure_install_dir
     log "🚀 Running setup.sh version $SETUP_VERSION — Upgrade"
 
     if [ ! -d "$VENV_DIR" ]; then
         log "⚠️  Installation not detected (no virtualenv at $VENV_DIR)."
-        log "    Please run Install (option 4) first."
+        log "    Please run Install (option ${MENU_INSTALL}) first."
         return
     fi
 
@@ -1529,19 +1548,13 @@ function upgrade_scripts() {
 
     # -------------------------------------------------------------------------
     # Whitelist-based cleanup — remove deprecated top-level files.
+    # Derived from the GitHub API listing (FILES) so new repo files are never
+    # accidentally deleted. Runtime-generated artifacts are also preserved.
     # Directories audio/ and sonos-env/ (and dotfiles) are always preserved.
     # -------------------------------------------------------------------------
-    local _whitelist=(
-        audio_check.py
-        config.json
-        config.py
-        requirements.txt
-        schedule_sonos.py
-        setup.sh
-        sonos_play.py
-        setup.log
-        sonos_play.log
-    )
+    local _whitelist=()
+    for _f in $FILES; do _whitelist+=("$_f"); done
+    _whitelist+=(setup.log sonos_play.log)
 
     local _deprecated_count=0
 
@@ -1763,11 +1776,13 @@ fi
 
 # ---------------------------------------------------------------------------
 
+_ensure_install_dir
+
 while true; do
     detect_install_state
     prompt_menu
     case $CHOICE in
-        1)
+        "$MENU_LIST")
             if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
                 show_install_required_msg
                 echo ""
@@ -1778,7 +1793,7 @@ while true; do
                 read -rp "  Press Enter to return to menu..." _pause
             fi
             ;;
-        2)
+        "$MENU_SUNSET")
             if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
                 show_install_required_msg
                 echo ""
@@ -1789,7 +1804,7 @@ while true; do
                 read -rp "  Press Enter to return to menu..." _pause
             fi
             ;;
-        3)
+        "$MENU_TEST")
             if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
                 show_install_required_msg
                 echo ""
@@ -1800,7 +1815,7 @@ while true; do
                 read -rp "  Press Enter to return to menu..." _pause
             fi
             ;;
-        4)
+        "$MENU_LOGS")
             if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
                 show_install_required_msg
                 echo ""
@@ -1811,10 +1826,10 @@ while true; do
                 read -rp "  Press Enter to return to menu..." _pause
             fi
             ;;
-        5)
+        "$MENU_INSTALL")
             install_fresh
             ;;
-        6)
+        "$MENU_UPGRADE")
             if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
                 show_install_required_msg
                 echo ""
@@ -1823,7 +1838,7 @@ while true; do
                 upgrade_scripts
             fi
             ;;
-        7)
+        "$MENU_RECONFIG")
             if [ "$INSTALL_STATE" = "none" ]; then
                 show_install_required_msg
             else
@@ -1838,12 +1853,12 @@ while true; do
                     log "🗓️  Regenerating systemd timer units..."
                     maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
                 else
-                    log "⚠️  Python venv not found. Run option 5 (Install) to create systemd timers."
+                    log "⚠️  Python venv not found. Run option ${MENU_INSTALL} (Install) to create systemd timers."
                 fi
                 log "✅ Reconfiguration complete."
             fi
             ;;
-        8)
+        "$MENU_UNINSTALL")
             uninstall_all
             ;;
         *)
