@@ -1,21 +1,21 @@
 # Honor tradition with tech
 
-🎖️ **Honor tradition with tech** — This project plays a full Navy base bugle-call schedule — Morning Colors, Evening Colors, and Taps — on one or more Sonos speakers automatically every day.
+🎖️ **Honor tradition with tech** — This project plays a full Navy base bugle-call schedule — First Call, Morning Colors, Carry On, Retreat, Evening Colors, and Taps — on one or more Sonos speakers automatically every day.
 
 ---
 
 ## 🌟 Features
 
-✅ Play **Morning Colors** (First Call → Attention+To the Colors) starting at **07:55**  
-🌅 Play **Evening Colors** relative to **sunset** (First Call 5 min before, To the Colors 1 min before)  
-🌙 Play **Taps** at **21:00** every night  
+✅ Play **First Call** at **07:55**, **Morning Colors** at **08:00**, and **Carry On** at **08:01** every morning  
+🌅 Play **Retreat** 5 minutes before sunset and **Evening Colors** at sunset every evening  
+🌙 Play **Taps** at **22:00** every night  
 🔊 **Multi-speaker synchronized playback** — configure one or more Sonos speakers; all play in sync via a temporary Sonos group  
 🔇 Pause what's playing and **restore** it after the call — per speaker, including volume  
 📄 Log every playback to `/opt/flag/sonos_play.log`  
 📡 Serve your MP3s via a **tiny HTTP server**  
 ⚙️ Customize everything via `/opt/flag/config.json`  
 🖥️ Scheduled via **systemd timers** — better logging, structured journald output, and explicit "missed plays are skipped, never replayed late" semantics  
-🎵 **Extensible schedules** — add any number of scheduled plays by editing `config.json`, no code changes needed  
+🎵 **Extensible schedules** — add, edit, or remove scheduled plays interactively from the setup menu, or by editing `config.json` directly  
 
 ---
 
@@ -24,7 +24,7 @@
 - 🐍 Python 3.8+
 - 📶 One or more Sonos speakers on the local network
 - 🖥️ Ubuntu/Debian VM, LXC container, or **Raspberry Pi** (systemd required)
-- 🎧 Default `colors.mp3` and `taps.mp3` audio files are included; replace with your own if desired
+- 🎧 Seven traditional bugle-call MP3s are included (`first_call.mp3`, `morning_colors.mp3`, `carry_on.mp3`, `retreat.mp3`, `evening_colors.mp3`, `colors.mp3`, `taps.mp3`)
 
 ---
 
@@ -69,13 +69,13 @@ chmod +x setup.sh
 **You will be prompted with a menu:**
 
 ```
-╔══════════════════════════════════════════╗
-║     Honor Tradition with Tech — Setup    ║
-║     Version 2.2.0                        ║
-║     Status: ✅ Installed                  ║
-╚══════════════════════════════════════════╝
+============================================
+  Honor Tradition with Tech — Setup
+============================================
+  Version: 2.4.2
+  Status:  ✅ Installed
   Config:  Speakers (2): Living Room (192.168.1.50), Kitchen (192.168.1.51)
-           Schedules: 2
+           Schedules: 6
   Sunset:  🌅 19:45 (America/New_York)
 
   ── Read-only ──────────────────────────
@@ -88,11 +88,12 @@ chmod +x setup.sh
   5) Install (first-time setup)
   6) Upgrade (update scripts, keep config)
   7) Reconfigure (edit config.json interactively)
+  8) Manage scheduled plays (add / edit / remove)
 
   ── Danger zone ────────────────────────
-  8) Uninstall completely
+  9) Uninstall completely
 
-  9) Exit without doing anything
+  10) Exit without doing anything
 ```
 
 > **Install state detection:** When `setup.sh` loads, it automatically checks for the Python virtual environment (`/opt/flag/sonos-env`), the config file (`/opt/flag/config.json`), and active systemd timers. If any component is missing, a warning is displayed above the menu with guidance on which option to select. On a fresh system, the "Install" option is marked with `← start here` and options that require a working installation are annotated with `(requires install)`.
@@ -106,8 +107,9 @@ chmod +x setup.sh
 | **5** | Install (first-time setup) — installs system deps, downloads files, creates venv, runs config wizard, writes systemd timers |
 | **6** | Upgrade — downloads latest scripts from GitHub and upgrades pip packages; **preserves your existing `config.json`** |
 | **7** | Reconfigure — re-runs the config wizard to edit settings and regenerate timers |
-| **8** | Uninstall — removes all files, systemd services, and timers |
-| **9** | Exit without making any changes |
+| **8** | Manage scheduled plays — interactive sub-menu to add, edit, or remove schedule entries and immediately regenerate systemd timers |
+| **9** | Uninstall — removes all files, systemd services, and timers |
+| **10** | Exit without making any changes |
 
 > The script will automatically download all required files from GitHub using wget (no `git clone` needed), create a Python virtual environment, install dependencies, and generate a default `config.json` if needed.
 
@@ -130,20 +132,24 @@ After setup, your `/opt/flag/` folder should look like:
 ├── config.json            # 🔧 Settings (auto-generated if missing)
 ├── sonos-env/             # 🐍 Virtual environment
 └── audio/
-    ├── first_call.mp3     # 🎺 First Call bugle (morning and evening)
-    ├── morning_colors.mp3 # 🎶 Attention + To the Colors (morning)
-    ├── evening_colors.mp3 # 🎶 To the Colors (evening)
-    └── taps.mp3           # 🌅 Taps (21:00)
+    ├── first_call.mp3     # 🎺 First Call (07:55)
+    ├── morning_colors.mp3 # 🎶 Attention + To the Colors (08:00)
+    ├── carry_on.mp3       # 🎵 Carry On (08:01)
+    ├── retreat.mp3        # 🎺 Retreat (sunset−5 min)
+    ├── evening_colors.mp3 # 🎶 To the Colors (sunset)
+    ├── colors.mp3         # 🎶 Generic Colors (not in default schedule)
+    └── taps.mp3           # 🌙 Taps (22:00)
 ```
 
 **Systemd unit files** (written by `schedule_sonos.py` to `/etc/systemd/system/`):
 
 ```
-flag-morning-first-call.service / flag-morning-first-call.timer   # First Call at 07:55
-flag-morning-colors.service     / flag-morning-colors.timer        # Attention+Colors at 07:59
-flag-evening-first-call.service / flag-evening-first-call.timer    # First Call at sunset−5 min (updated daily)
-flag-evening-colors.service     / flag-evening-colors.timer        # To the Colors at sunset−1 min (updated daily)
-flag-taps.service               / flag-taps.timer                  # Taps at 21:00
+flag-first_call.service     / flag-first_call.timer       # First Call at 07:55
+flag-morning_colors.service / flag-morning_colors.timer   # Morning Colors at 08:00
+flag-carry_on.service       / flag-carry_on.timer         # Carry On at 08:01
+flag-retreat.service        / flag-retreat.timer          # Retreat at sunset−5 min (updated daily)
+flag-evening_colors.service / flag-evening_colors.timer   # Evening Colors at sunset (updated daily)
+flag-taps.service           / flag-taps.timer             # Taps at 22:00
 flag-reschedule.service / flag-reschedule.timer  # Daily 02:00 — recalculates sunset
 flag-boot-reschedule.service                     # Oneshot on boot — recomputes sunset before timers fire
 flag-audio-http.service                          # HTTP audio file server
@@ -189,29 +195,34 @@ Edit `/opt/flag/config.json` to match your Sonos and preferences:
   "sunset_offset_minutes": 0,
   "schedules": [
     {
-      "name": "morning-first-call",
+      "name": "first_call",
       "audio_url": "http://192.168.1.10:8000/first_call.mp3",
       "time": "07:55"
     },
     {
-      "name": "morning-colors",
+      "name": "morning_colors",
       "audio_url": "http://192.168.1.10:8000/morning_colors.mp3",
-      "time": "07:59"
+      "time": "08:00"
     },
     {
-      "name": "evening-first-call",
-      "audio_url": "http://192.168.1.10:8000/first_call.mp3",
+      "name": "carry_on",
+      "audio_url": "http://192.168.1.10:8000/carry_on.mp3",
+      "time": "08:01"
+    },
+    {
+      "name": "retreat",
+      "audio_url": "http://192.168.1.10:8000/retreat.mp3",
       "time": "sunset-5min"
     },
     {
-      "name": "evening-colors",
+      "name": "evening_colors",
       "audio_url": "http://192.168.1.10:8000/evening_colors.mp3",
-      "time": "sunset-1min"
+      "time": "sunset"
     },
     {
       "name": "taps",
       "audio_url": "http://192.168.1.10:8000/taps.mp3",
-      "time": "21:00"
+      "time": "22:00"
     }
   ]
 }

@@ -8,7 +8,7 @@
 set -e
 set -o pipefail
 
-SETUP_VERSION="2.4.1"
+SETUP_VERSION="2.4.2"
 
 # Menu option numbers — single source of truth so messages never drift.
 readonly MENU_LIST=1
@@ -18,8 +18,9 @@ readonly MENU_LOGS=4
 readonly MENU_INSTALL=5
 readonly MENU_UPGRADE=6
 readonly MENU_RECONFIG=7
-readonly MENU_UNINSTALL=8
-readonly MENU_EXIT=9
+readonly MENU_MANAGE=8
+readonly MENU_UNINSTALL=9
+readonly MENU_EXIT=10
 
 # ---------------------------------------------------------------------------
 # Table of contents
@@ -30,6 +31,7 @@ readonly MENU_EXIT=9
 #   Configuration:   configure_setup
 #   Sunset:          show_sunset_time, get_sunset_header_line
 #   Status:          test_sonos_playback, list_scheduled_plays, view_logs
+#   Manage plays:    _msp_valid_time, _msp_pick_file, manage_scheduled_plays
 #   Install state:   detect_install_state, show_install_required_msg,
 #                    _require_install, _resolve_speaker_names
 #   Menu:            prompt_menu
@@ -326,6 +328,22 @@ PYEOF
             return
         fi
     done
+}
+
+# ---------------------------------------------------------------------------
+# Seeds _snames, _sfiles, _stimes, and _scount with the six-entry traditional
+# bugle-call default schedule.  Called from configure_setup whenever no
+# existing schedules are present or the user asks to start fresh.
+# ---------------------------------------------------------------------------
+function _seed_default_schedules() {
+    _snames=(); _sfiles=(); _stimes=(); _scount=0
+    _snames[0]="first_call";     _sfiles[0]="first_call.mp3";     _stimes[0]="07:55"
+    _snames[1]="morning_colors"; _sfiles[1]="morning_colors.mp3"; _stimes[1]="08:00"
+    _snames[2]="carry_on";       _sfiles[2]="carry_on.mp3";       _stimes[2]="08:01"
+    _snames[3]="retreat";        _sfiles[3]="retreat.mp3";        _stimes[3]="sunset-5min"
+    _snames[4]="evening_colors"; _sfiles[4]="evening_colors.mp3"; _stimes[4]="sunset"
+    _snames[5]="taps";           _sfiles[5]="taps.mp3";           _stimes[5]="22:00"
+    _scount=6
 }
 
 # ---------------------------------------------------------------------------
@@ -630,11 +648,8 @@ function configure_setup() {
             _keep="${_keep:-y}"
             if [[ "${_keep,,}" == "n" ]]; then
                 # Start fresh with defaults
-                _snames=(); _sfiles=(); _stimes=(); _scount=0
-                echo "  Starting fresh with default schedules (colors + taps)."
-                _snames[0]="colors"; _sfiles[0]="colors.mp3"; _stimes[0]="08:00"
-                _snames[1]="taps";   _sfiles[1]="taps.mp3";   _stimes[1]="sunset"
-                _scount=2
+                echo "  Starting fresh with the traditional six-entry bugle schedule."
+                _seed_default_schedules
             fi
         elif jq -e '.colors_url' "$CONFIG_FILE" &>/dev/null 2>&1; then
             # Old flat config — auto-migrate to the new schedules format
@@ -650,15 +665,11 @@ function configure_setup() {
             echo "  Pre-populated: colors (${_stimes[0]}), taps (sunset)"
         else
             # No existing schedules — use defaults
-            _snames[0]="colors"; _sfiles[0]="colors.mp3"; _stimes[0]="08:00"
-            _snames[1]="taps";   _sfiles[1]="taps.mp3";   _stimes[1]="sunset"
-            _scount=2
+            _seed_default_schedules
         fi
     else
         # No config file yet — use defaults
-        _snames[0]="colors"; _sfiles[0]="colors.mp3"; _stimes[0]="08:00"
-        _snames[1]="taps";   _sfiles[1]="taps.mp3";   _stimes[1]="sunset"
-        _scount=2
+        _seed_default_schedules
     fi
 
     # Show the user what's been pre-populated before asking for more
@@ -669,7 +680,8 @@ function configure_setup() {
             echo "    $(( _i + 1 )). name='${_snames[$_i]}'  file='${_sfiles[$_i]}'  time='${_stimes[$_i]}'"
         done
         echo ""
-        echo "  ℹ️  To add more plays later, use option 1) List scheduled plays from the main menu."
+        echo "  ℹ️  To add, edit, or remove plays later, use option ${MENU_MANAGE}) Manage scheduled plays"
+        echo "     from the main menu."
         echo ""
         read -rp "  Continue? [Y/n]: " _continue
         _continue="${_continue:-y}"
@@ -681,10 +693,8 @@ function configure_setup() {
 
     # Safety net: if no schedules ended up configured, restore defaults
     if [ "$_scount" -eq 0 ]; then
-        echo "  ⚠️  No schedules configured. Falling back to defaults (colors + taps)."
-        _snames[0]="colors"; _sfiles[0]="colors.mp3"; _stimes[0]="08:00"
-        _snames[1]="taps";   _sfiles[1]="taps.mp3";   _stimes[1]="sunset"
-        _scount=2
+        echo "  ⚠️  No schedules configured. Falling back to traditional bugle defaults."
+        _seed_default_schedules
     fi
 
     # Build the schedules JSON array using jq for proper encoding
@@ -1020,6 +1030,312 @@ function list_scheduled_plays() {
     echo ""
 }
 
+# ---------------------------------------------------------------------------
+# Validates a schedule time string.  Returns 0 for valid, 1 for invalid.
+# Accepted formats:
+#   HH:MM          — 24-hour, 00:00–23:59
+#   sunset         — literal string
+#   sunset+Nmin    — N in 1–720
+#   sunset-Nmin    — N in 1–720
+# ---------------------------------------------------------------------------
+function _msp_valid_time() {
+    local _t="$1"
+    if [[ "$_t" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then return 0; fi
+    if [[ "$_t" == "sunset" ]]; then return 0; fi
+    if [[ "$_t" =~ ^sunset[+-][0-9]+min$ ]]; then
+        local _n
+        _n=$(echo "$_t" | grep -oE '[0-9]+')
+        [ "$_n" -ge 1 ] && [ "$_n" -le 720 ] && return 0
+    fi
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Presents a numbered list of *.mp3 files from AUDIO_DIR and lets the user
+# pick one by number or by typing the filename.  Sets _PICKED_FILE on
+# success.  Returns 1 if the directory is empty or the input is invalid.
+# Optional first argument: default filename shown in brackets.
+# ---------------------------------------------------------------------------
+function _msp_pick_file() {
+    local _default="$1"
+    _PICKED_FILE=""
+    local -a _mp3s
+    while IFS= read -r -d $'\0' _f; do
+        _mp3s+=("$(basename "$_f")")
+    done < <(find "$AUDIO_DIR" -maxdepth 1 -name '*.mp3' -print0 2>/dev/null | sort -z)
+
+    if [ "${#_mp3s[@]}" -eq 0 ]; then
+        echo "  ⚠️  No MP3 files found in $AUDIO_DIR."
+        return 1
+    fi
+
+    echo "  Available audio files:"
+    for (( _k=0; _k<${#_mp3s[@]}; _k++ )); do
+        printf "    %d) %s\n" "$(( _k + 1 ))" "${_mp3s[$_k]}"
+    done
+    if [ -n "$_default" ]; then
+        read -rp "  Pick a file by number or name [${_default}]: " _finput
+    else
+        read -rp "  Pick a file by number or name: " _finput
+    fi
+    _finput="${_finput:-$_default}"
+    if [[ "$_finput" =~ ^[0-9]+$ ]]; then
+        local _idx=$(( _finput - 1 ))
+        if [ "$_idx" -ge 0 ] && [ "$_idx" -lt "${#_mp3s[@]}" ]; then
+            _PICKED_FILE="${_mp3s[$_idx]}"
+            return 0
+        fi
+        echo "  ⚠️  Number out of range."
+        return 1
+    fi
+    # Typed filename — must exist in AUDIO_DIR
+    for _m in "${_mp3s[@]}"; do
+        if [ "$_m" = "$_finput" ]; then
+            _PICKED_FILE="$_finput"
+            return 0
+        fi
+    done
+    echo "  ⚠️  '$_finput' not found in $AUDIO_DIR."
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Interactive sub-menu to add, edit, and remove scheduled plays.
+# Loads the current schedules from config.json into the same parallel-array
+# state used by configure_setup (_snames / _sfiles / _stimes / _scount),
+# lets the user modify them, then atomically writes only the .schedules key
+# back to config.json and re-runs schedule_sonos.py.
+# ---------------------------------------------------------------------------
+function manage_scheduled_plays() {
+    echo ""
+    echo "============================================"
+    echo "  Manage Scheduled Plays"
+    echo "============================================"
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "  ⚠️  config.json not found. Please run Install first."
+        return
+    fi
+    if ! command -v jq &>/dev/null; then
+        echo "  ⚠️  'jq' not found. Cannot manage schedules."
+        return
+    fi
+
+    # Load current schedules into global parallel arrays (no local/declare so
+    # the helper functions _msp_list, _msp_valid_time, _msp_pick_file can see them).
+    _snames=(); _sfiles=(); _stimes=(); _scount=0
+    local _loaded_count
+    _loaded_count=$(jq '.schedules | length // 0' "$CONFIG_FILE" 2>/dev/null || echo "0")
+    for (( _i=0; _i<_loaded_count; _i++ )); do
+        _snames[$_scount]=$(jq -r ".schedules[${_i}].name" "$CONFIG_FILE")
+        _sfiles[$_scount]=$(jq -r ".schedules[${_i}].audio_url" "$CONFIG_FILE" | sed 's|.*/||')
+        _stimes[$_scount]=$(jq -r ".schedules[${_i}].time" "$CONFIG_FILE")
+        _scount=$(( _scount + 1 ))
+    done
+
+    while true; do
+        echo ""
+        echo "  ── Manage Scheduled Plays ──────────────────────────────"
+        echo "  1) List current schedules"
+        echo "  2) Add a new schedule"
+        echo "  3) Edit an existing schedule"
+        echo "  4) Remove a schedule"
+        echo "  5) Save and apply changes"
+        echo "  6) Cancel without saving"
+        echo ""
+        read -rp "  Enter your choice [1-6]: " _sub_choice
+
+        case "$_sub_choice" in
+            1)
+                # ── List ──
+                echo ""
+                if [ "$_scount" -eq 0 ]; then
+                    echo "  (no schedules configured)"
+                else
+                    printf "  %-4s %-20s %-25s %-12s\n" "#" "NAME" "AUDIO FILE" "TIME"
+                    printf "  %-4s %-20s %-25s %-12s\n" "----" "--------------------" "-------------------------" "------------"
+                    for (( _j=0; _j<_scount; _j++ )); do
+                        printf "  %-4s %-20s %-25s %-12s\n" \
+                            "$(( _j + 1 ))" "${_snames[$_j]}" "${_sfiles[$_j]}" "${_stimes[$_j]}"
+                    done
+                fi
+                ;;
+            2)
+                # ── Add ──
+                echo ""
+                echo "  ── Add a New Schedule ──"
+                while true; do
+                    _msp_pick_file "" && break
+                done
+                local _new_file="$_PICKED_FILE"
+                local _stem="${_new_file%.mp3}"
+                local _new_name=""
+                while true; do
+                    read -rp "  Schedule name [${_stem}]: " _new_name
+                    _new_name="${_new_name:-$_stem}"
+                    if [[ ! "$_new_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+                        echo "  ⚠️  Name must match [a-zA-Z0-9_-] and be non-empty."
+                        continue
+                    fi
+                    local _dup=false
+                    for (( _di=0; _di<_scount; _di++ )); do
+                        if [ "${_snames[$_di]}" = "$_new_name" ]; then
+                            _dup=true; break
+                        fi
+                    done
+                    if [ "$_dup" = true ]; then
+                        echo "  ⚠️  A schedule named '$_new_name' already exists."
+                        continue
+                    fi
+                    break
+                done
+                local _new_time=""
+                echo "  Accepted time formats: HH:MM  |  sunset  |  sunset+Nmin  |  sunset-Nmin  (N: 1-720)"
+                while true; do
+                    read -rp "  Time: " _new_time
+                    _msp_valid_time "$_new_time" && break
+                    echo "  ⚠️  Invalid time. Use HH:MM, 'sunset', or 'sunset±Nmin' (N 1–720)."
+                done
+                _snames[$_scount]="$_new_name"
+                _sfiles[$_scount]="$_new_file"
+                _stimes[$_scount]="$_new_time"
+                _scount=$(( _scount + 1 ))
+                echo "  ✅ Added: name='$_new_name'  file='$_new_file'  time='$_new_time'"
+                ;;
+            3)
+                # ── Edit ──
+                echo ""
+                if [ "$_scount" -eq 0 ]; then
+                    echo "  (no schedules to edit)"
+                    continue
+                fi
+                printf "  %-4s %-20s %-25s %-12s\n" "#" "NAME" "AUDIO FILE" "TIME"
+                printf "  %-4s %-20s %-25s %-12s\n" "----" "--------------------" "-------------------------" "------------"
+                for (( _j=0; _j<_scount; _j++ )); do
+                    printf "  %-4s %-20s %-25s %-12s\n" \
+                        "$(( _j + 1 ))" "${_snames[$_j]}" "${_sfiles[$_j]}" "${_stimes[$_j]}"
+                done
+                echo ""
+                read -rp "  Enter the number to edit (0 to cancel): " _edit_idx
+                if [[ "$_edit_idx" == "0" ]] || [[ -z "$_edit_idx" ]]; then
+                    echo "  Cancelled."
+                    continue
+                fi
+                if ! [[ "$_edit_idx" =~ ^[0-9]+$ ]] || [ "$_edit_idx" -lt 1 ] || [ "$_edit_idx" -gt "$_scount" ]; then
+                    echo "  ⚠️  Invalid selection."
+                    continue
+                fi
+                local _ei=$(( _edit_idx - 1 ))
+                echo "  Editing: name='${_snames[$_ei]}'  file='${_sfiles[$_ei]}'  time='${_stimes[$_ei]}'"
+                echo "  (Name cannot be changed here — use Remove then Add to rename.)"
+                echo ""
+                while true; do
+                    _msp_pick_file "${_sfiles[$_ei]}" && break
+                done
+                _sfiles[$_ei]="$_PICKED_FILE"
+                echo "  Accepted time formats: HH:MM  |  sunset  |  sunset+Nmin  |  sunset-Nmin  (N: 1-720)"
+                while true; do
+                    read -rp "  Time [${_stimes[$_ei]}]: " _edit_time
+                    _edit_time="${_edit_time:-${_stimes[$_ei]}}"
+                    _msp_valid_time "$_edit_time" && break
+                    echo "  ⚠️  Invalid time. Use HH:MM, 'sunset', or 'sunset±Nmin' (N 1–720)."
+                done
+                _stimes[$_ei]="$_edit_time"
+                echo "  ✅ Updated: name='${_snames[$_ei]}'  file='${_sfiles[$_ei]}'  time='${_stimes[$_ei]}'"
+                ;;
+            4)
+                # ── Remove ──
+                echo ""
+                if [ "$_scount" -eq 0 ]; then
+                    echo "  (no schedules to remove)"
+                    continue
+                fi
+                printf "  %-4s %-20s %-25s %-12s\n" "#" "NAME" "AUDIO FILE" "TIME"
+                printf "  %-4s %-20s %-25s %-12s\n" "----" "--------------------" "-------------------------" "------------"
+                for (( _j=0; _j<_scount; _j++ )); do
+                    printf "  %-4s %-20s %-25s %-12s\n" \
+                        "$(( _j + 1 ))" "${_snames[$_j]}" "${_sfiles[$_j]}" "${_stimes[$_j]}"
+                done
+                echo ""
+                read -rp "  Enter the number to remove (0 to cancel): " _rm_idx
+                if [[ "$_rm_idx" == "0" ]] || [[ -z "$_rm_idx" ]]; then
+                    echo "  Cancelled."
+                    continue
+                fi
+                if ! [[ "$_rm_idx" =~ ^[0-9]+$ ]] || [ "$_rm_idx" -lt 1 ] || [ "$_rm_idx" -gt "$_scount" ]; then
+                    echo "  ⚠️  Invalid selection."
+                    continue
+                fi
+                local _ri=$(( _rm_idx - 1 ))
+                read -rp "  Remove '${_snames[$_ri]}' at ${_stimes[$_ri]}? [y/N]: " _rm_confirm
+                if [[ "${_rm_confirm,,}" != "y" ]]; then
+                    echo "  Cancelled."
+                    continue
+                fi
+                # Shift array elements down to fill the gap
+                for (( _si=_ri; _si<_scount-1; _si++ )); do
+                    _snames[$_si]="${_snames[$(( _si + 1 ))]}"
+                    _sfiles[$_si]="${_sfiles[$(( _si + 1 ))]}"
+                    _stimes[$_si]="${_stimes[$(( _si + 1 ))]}"
+                done
+                unset "_snames[$(( _scount - 1 ))]" \
+                      "_sfiles[$(( _scount - 1 ))]" \
+                      "_stimes[$(( _scount - 1 ))]"
+                _scount=$(( _scount - 1 ))
+                echo "  ✅ Removed."
+                ;;
+            5)
+                # ── Save and apply ──
+                echo ""
+                if [ ! -d "$VENV_DIR" ]; then
+                    echo "  ⚠️  Python venv not found. Cannot regenerate timers."
+                    continue
+                fi
+                # Derive host and port from existing config.json
+                local _save_port
+                _save_port=$(jq -r '.port // "8000"' "$CONFIG_FILE")
+                local _save_host
+                local _first_url
+                _first_url=$(jq -r '.schedules[0].audio_url // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+                if [[ "$_first_url" =~ ^http://([^/:]+): ]]; then
+                    _save_host="${BASH_REMATCH[1]}"
+                else
+                    _save_host=$(hostname -I | awk '{print $1}')
+                fi
+                # Build the updated SCHEDULES_JSON array
+                local _SAVE_JSON="[]"
+                for (( i=0; i<_scount; i++ )); do
+                    local _audio_url="http://${_save_host}:${_save_port}/${_sfiles[$i]}"
+                    _SAVE_JSON=$(printf '%s' "$_SAVE_JSON" | jq \
+                        --arg name  "${_snames[$i]}" \
+                        --arg url   "$_audio_url" \
+                        --arg time  "${_stimes[$i]}" \
+                        '. + [{"name": $name, "audio_url": $url, "time": $time}]')
+                done
+                # Atomically update only .schedules — leave all other config keys intact
+                jq --argjson schedules "$_SAVE_JSON" '.schedules = $schedules' \
+                    "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" \
+                    && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+                log "✅ Schedules saved to config.json."
+                log "🗓️  Regenerating systemd timer units..."
+                maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
+                log "✅ Timer units updated."
+                echo ""
+                read -rp "  Press Enter to return to menu..." _pause
+                return
+                ;;
+            6|"")
+                # ── Cancel ──
+                echo "  ↩️  Changes discarded."
+                return
+                ;;
+            *)
+                echo "  ⚠️  Invalid choice. Enter 1–6."
+                ;;
+        esac
+    done
+}
+
 function view_logs() {
     # Shows the last 20 lines of both setup.log and sonos_play.log side by side,
     # each prefixed with a section heading so recent activity is easy to scan.
@@ -1257,6 +1573,7 @@ function prompt_menu() {
     local _logs_label="View logs"
     local _upgrade_label="Upgrade (update scripts, keep config)"
     local _reconfig_label="Reconfigure (edit config.json interactively)"
+    local _manage_label="Manage scheduled plays (add / edit / remove)"
 
     if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
         _install_label="Install (first-time setup)  ← start here"
@@ -1265,6 +1582,7 @@ function prompt_menu() {
         _test_label="Test Sonos playback  (requires install)"
         _logs_label="View logs  (requires install)"
         _upgrade_label="Upgrade (update scripts, keep config)  (requires install)"
+        _manage_label="Manage scheduled plays (add / edit / remove)  (requires install)"
     fi
 
     if [ "$INSTALL_STATE" = "none" ]; then
@@ -1282,13 +1600,14 @@ function prompt_menu() {
     echo "  5) $_install_label"
     echo "  6) $_upgrade_label"
     echo "  7) $_reconfig_label"
+    echo "  8) $_manage_label"
     echo ""
     echo "  ── Danger zone ────────────────────────"
-    echo "  8) Uninstall completely"
+    echo "  9) Uninstall completely"
     echo ""
-    echo "  9) Exit without doing anything"
+    echo "  10) Exit without doing anything"
     echo ""
-    read -rp "Enter your choice [1-9]: " CHOICE
+    read -rp "Enter your choice [1-10]: " CHOICE
 }
 
 # ---------------------------------------------------------------------------
@@ -1933,6 +2252,10 @@ while true; do
                 fi
                 log "✅ Reconfiguration complete."
             fi
+            ;;
+        "$MENU_MANAGE")
+            _require_install || continue
+            manage_scheduled_plays
             ;;
         "$MENU_UNINSTALL")
             uninstall_all
