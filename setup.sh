@@ -36,6 +36,12 @@ CONFIG_FILE="$INSTALL_DIR/config.json"
 # lacks associative array support — the feature degrades to bare IPs.
 declare -A _SPEAKER_NAME_CACHE 2>/dev/null || true
 
+# Per-day cache for get_sunset_header_line — avoids a Python cold-start on
+# every menu render.  Both vars are set together; an empty _SUNSET_CACHE_DATE
+# means the cache is cold.
+_SUNSET_CACHE_DATE=""
+_SUNSET_CACHE_LINE=""
+
 function maybe_sudo() {
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
@@ -165,10 +171,7 @@ PYEOF
         read -rp "  Selection [0, 1-${COUNT}, comma-separated, or Enter for all discovered]: " SEL
         if [ -z "$SEL" ]; then
             # Select all discovered speakers
-            SONOS_IPS_JSON="[]"
-            for (( j=1; j<=COUNT; j++ )); do
-                SONOS_IPS_JSON=$(echo "$SONOS_IPS_JSON" | jq --arg ip "${_TEST_IPS[$j]}" '. + [$ip]')
-            done
+            SONOS_IPS_JSON=$(printf '%s\n' "${_TEST_IPS[@]:1:$COUNT}" | jq -R . | jq -s .)
             echo "  ✅ Selected all $COUNT discovered speaker(s)."
             return
         fi
@@ -267,10 +270,11 @@ PYEOF
         read -rp "  Selection [1-${COUNT}, comma-separated, or Enter for all]: " SEL
         if [ -z "$SEL" ]; then
             # Select all discovered speakers
-            SPEAKERS_JSON="[]"
-            for (( j=1; j<=COUNT; j++ )); do
-                SPEAKERS_JSON=$(echo "$SPEAKERS_JSON" | jq --arg ip "${DISC_IPS[$j]}" --arg name "${DISC_NAMES[$j]}" '. + [{ip: $ip, name: $name}]')
-            done
+            SPEAKERS_JSON=$(
+                for (( j=1; j<=COUNT; j++ )); do
+                    jq -n --arg ip "${DISC_IPS[$j]}" --arg name "${DISC_NAMES[$j]}" '{ip: $ip, name: $name}'
+                done | jq -s .
+            )
             echo "  ✅ Selected all $COUNT speaker(s)."
             return
         fi
@@ -778,6 +782,14 @@ function get_sunset_header_line() {
     [ -d "$VENV_DIR" ] || return
     [ -f "$CONFIG_FILE" ] || return
 
+    # Return cached value if it was computed today.
+    local _today
+    _today=$(date +%Y-%m-%d)
+    if [ "$_SUNSET_CACHE_DATE" = "$_today" ]; then
+        SUNSET_HEADER_LINE="$_SUNSET_CACHE_LINE"
+        return
+    fi
+
     local _sunset_output
     _sunset_output=$(cd "$INSTALL_DIR" && "$VENV_DIR/bin/python" - <<'PYEOF' 2>/dev/null
 import sys
@@ -816,6 +828,10 @@ PYEOF
         _am=$(( _total % 60 ))
         SUNSET_HEADER_LINE=$(printf "  Sunset:  🌅 %s → Taps at %02d:%02d (offset: %d min)" "$_time" "$_ah" "$_am" "$_offset")
     fi
+
+    # Populate per-day cache.
+    _SUNSET_CACHE_DATE="$_today"
+    _SUNSET_CACHE_LINE="$SUNSET_HEADER_LINE"
 }
 
 # ---------------------------------------------------------------------------
@@ -866,14 +882,8 @@ function test_sonos_playback() {
             echo "  ⚠️  No IP provided. Aborting test."
             return
         fi
-        SONOS_IPS_JSON="[]"
         IFS=',' read -ra _ips <<< "$_MANUAL_IPS"
-        for _ip in "${_ips[@]}"; do
-            _ip="${_ip// /}"
-            if [ -n "$_ip" ]; then
-                SONOS_IPS_JSON=$(echo "$SONOS_IPS_JSON" | jq --arg ip "$_ip" '. + [$ip]')
-            fi
-        done
+        SONOS_IPS_JSON=$(printf '%s\n' "${_ips[@]}" | sed '/^[[:space:]]*$/d' | tr -d ' ' | jq -R . | jq -s .)
     fi
 
     if [ "$(echo "$SONOS_IPS_JSON" | jq 'length')" -eq 0 ]; then
@@ -1111,18 +1121,19 @@ PYEOF
         done
     fi
 
-    # Build display string from cache + per-speaker volume annotation
+    # Build display string from cache + per-speaker volume annotation.
+    # Build the IP→volume map once (single jq call) rather than once per speaker.
     local _global_vol
     _global_vol=$(jq -r '.volume // 30' "$_cfg" 2>/dev/null || echo 30)
+    declare -A _VOL_MAP
+    while IFS=$'\t' read -r _vmip _vmvol; do
+        [ -n "$_vmip" ] && _VOL_MAP["$_vmip"]="$_vmvol"
+    done < <(echo "$_speakers_json" | jq -r '.[] | [.ip, (if has("volume") then (.volume|tostring) else "" end)] | @tsv' 2>/dev/null || true)
+
     local _parts=()
     while IFS= read -r _ip; do
         local _name="${_SPEAKER_NAME_CACHE[$_ip]:-}"
-        # Per-speaker volume (if explicitly set in config)
-        local _spk_vol
-        _spk_vol=$(echo "$_speakers_json" | jq -r \
-            --arg ip "$_ip" \
-            '[.[] | select(.ip == $ip)] | first | if has("volume") then .volume | tostring else "" end' \
-            2>/dev/null || echo "")
+        local _spk_vol="${_VOL_MAP[$_ip]:-}"
         local _vol_annotation=""
         if [ -n "$_spk_vol" ]; then
             _vol_annotation=" @${_spk_vol}"
