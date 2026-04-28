@@ -21,6 +21,23 @@ readonly MENU_RECONFIG=7
 readonly MENU_UNINSTALL=8
 readonly MENU_EXIT=9
 
+# ---------------------------------------------------------------------------
+# Table of contents
+# ---------------------------------------------------------------------------
+#   Helpers:         maybe_sudo, log, cfg_default, _ensure_install_dir
+#   Service writer:  write_service_file
+#   Speaker picker:  _pick_speakers_for_test, discover_sonos_speakers
+#   Configuration:   configure_setup
+#   Sunset:          show_sunset_time, get_sunset_header_line
+#   Status:          test_sonos_playback, list_scheduled_plays, view_logs
+#   Install state:   detect_install_state, show_install_required_msg,
+#                    _require_install, _resolve_speaker_names
+#   Menu:            prompt_menu
+#   Lifecycle:       install_fresh, upgrade_scripts, uninstall_all
+#   CLI parsing:     _print_usage + arg dispatch
+#   Main loop:       (bottom of file)
+# ---------------------------------------------------------------------------
+
 BASE_URL="https://raw.githubusercontent.com/agster27/flag/main"
 INSTALL_DIR="/opt/flag"
 AUDIO_DIR="$INSTALL_DIR/audio"
@@ -42,6 +59,11 @@ declare -A _SPEAKER_NAME_CACHE 2>/dev/null || true
 _SUNSET_CACHE_DATE=""
 _SUNSET_CACHE_LINE=""
 
+# ---------------------------------------------------------------------------
+# Sudo wrapper: runs a command as root when the current user is not root,
+# no-ops (runs directly) when already root so 'sudo' is never invoked
+# unnecessarily during privileged CI or container runs.
+# ---------------------------------------------------------------------------
 function maybe_sudo() {
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
@@ -60,6 +82,12 @@ function _ensure_install_dir() {
     maybe_sudo chown "$(whoami)" "$INSTALL_DIR"
 }
 
+# ---------------------------------------------------------------------------
+# Logging helper: writes timestamped messages to both $LOG_FILE (appended)
+# and stdout via tee.  Falls back to stdout-only when $LOG_FILE's parent
+# directory does not exist or is not writable (e.g. before install_fresh has
+# created /opt/flag).
+# ---------------------------------------------------------------------------
 function log() {
     local _msg="[$(date +'%Y-%m-%d %H:%M:%S')] $*"
     if [[ -n "$LOG_FILE" && -d "$(dirname "$LOG_FILE")" && -w "$(dirname "$LOG_FILE")" ]]; then
@@ -835,6 +863,12 @@ PYEOF
 
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Interactive speaker picker + one-shot playback test.
+# Calls _pick_speakers_for_test to let the user choose discovered or manual
+# speakers, then plays the first scheduled audio URL using sonos_play.py.
+# Falls back to manual IP entry when Sonos discovery finds nothing.
+# ---------------------------------------------------------------------------
 function test_sonos_playback() {
     echo ""
     echo "============================================"
@@ -932,6 +966,9 @@ function test_sonos_playback() {
 }
 
 function list_scheduled_plays() {
+    # Displays a formatted table of all configured schedules (name, audio file,
+    # time), the status of active systemd flag-*.timers, and whether the audio
+    # HTTP server (flag-audio-http) is running, installed-but-stopped, or absent.
     echo ""
     echo "============================================"
     echo "  Scheduled Plays                           "
@@ -984,6 +1021,8 @@ function list_scheduled_plays() {
 }
 
 function view_logs() {
+    # Shows the last 20 lines of both setup.log and sonos_play.log side by side,
+    # each prefixed with a section heading so recent activity is easy to scan.
     echo ""
     echo "============================================"
     echo "  Recent Logs                               "
@@ -1162,6 +1201,11 @@ PYEOF
     _RESOLVED_SPEAKERS_DISPLAY="${_RESOLVED_SPEAKERS_DISPLAY%, }"
 }
 
+# ---------------------------------------------------------------------------
+# Renders the main interactive menu (header, status, config summary, sunset
+# line, and numbered option list).  Reads the user's choice into $CHOICE.
+# The caller is responsible for detecting install state before calling this.
+# ---------------------------------------------------------------------------
 function prompt_menu() {
     echo ""
     echo "============================================"
@@ -1243,6 +1287,16 @@ function prompt_menu() {
     read -rp "Enter your choice [1-9]: " CHOICE
 }
 
+# ---------------------------------------------------------------------------
+# Complete uninstall — removes all traces of the installation.  Accepts an
+# optional --yes / -y flag to skip the confirmation prompt (for scripted
+# teardown).  Five numbered phases:
+#   1. Systemd units   — disable + stop + remove flag-* and legacy sonos-* units
+#   2. Install dir     — rm -rf /opt/flag (sets LOG_FILE="" so log() falls back)
+#   3. Legacy dirs     — remove older install locations (/opt/sonos-flag, etc.)
+#   4. Cron entries    — purge matching entries from current-user and root crontabs
+#   5. setup.sh itself — removes the script if it lives outside INSTALL_DIR
+# ---------------------------------------------------------------------------
 function uninstall_all() {
     # Optional first argument: "--yes" or "-y" to skip confirmation prompt.
     local _skip_confirm=false
@@ -1402,6 +1456,16 @@ function uninstall_all() {
     exit 0
 }
 
+# ---------------------------------------------------------------------------
+# Full first-time installation.  Order of operations:
+#   1. _ensure_install_dir — create /opt/flag if absent
+#   2. System dependencies  — apt-get (python3-venv, ffmpeg, jq, wget)
+#   3. Download scripts     — GitHub API listing → wget each file
+#   4. Python venv          — python3 -m venv + pip install requirements
+#   5. Configuration wizard — configure_setup writes config.json
+#   6. Systemd service      — write_service_file + enable flag-audio-http
+#   7. Systemd timers       — schedule_sonos.py generates flag-*.timer units
+# ---------------------------------------------------------------------------
 function install_fresh() {
     _ensure_install_dir
     log "🚀 Running setup.sh version $SETUP_VERSION"
@@ -1519,6 +1583,16 @@ EOF
     log "Or re-run this script and choose option ${MENU_RECONFIG} (Reconfigure)."
 }
 
+# ---------------------------------------------------------------------------
+# In-place upgrade — downloads the latest scripts from GitHub while
+# preserving config.json.  Order of operations:
+#   1. _ensure_install_dir — create /opt/flag if absent
+#   2. Download scripts    — GitHub API listing → wget (skip config.json)
+#   3. Whitelist cleanup   — remove top-level files not in the API listing
+#   4. Remove stale units  — flag-* timers/services no longer in config
+#   5. Pip upgrade         — pip install --upgrade -r requirements.txt
+#   6. Regenerate timers   — schedule_sonos.py rewrites flag-*.timer units
+# ---------------------------------------------------------------------------
 function upgrade_scripts() {
     _ensure_install_dir
     log "🚀 Running setup.sh version $SETUP_VERSION — Upgrade"
