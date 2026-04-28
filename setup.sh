@@ -1183,9 +1183,9 @@ function prompt_menu() {
         echo "  Config:  ⚠️  config.json not found"
     elif ! command -v jq &>/dev/null; then
         echo "  Config:  ⚠️  'jq' not installed — cannot read config.json"
-    elif ! _json_err=$(validate_config_json "$CONFIG_FILE" 2>&1); then
+    elif ! _validation_output=$(validate_config_json "$CONFIG_FILE" 2>&1); then
         echo "  Config:  ⚠️  invalid JSON in $CONFIG_FILE"
-        echo "$_json_err" | sed 's/^/           /'
+        echo "$_validation_output" | sed 's/^/           /'
         echo "           Fix it with 'jq . $CONFIG_FILE' or run option 7 (Reconfigure)."
     else
         _speaker_count=$(jq '.speakers | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
