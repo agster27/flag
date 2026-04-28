@@ -15,7 +15,7 @@ Run with:
 import sys
 import os
 import unittest
-from datetime import time as _time
+from datetime import time as datetime_time
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -48,7 +48,7 @@ def _mock_datetime(hour, minute):
     datetime.now(tz).time() returns the given (hour, minute).
     """
     mock_now = MagicMock()
-    mock_now.time.return_value = _time(hour, minute)
+    mock_now.time.return_value = datetime_time(hour, minute)
     mock_dt = MagicMock()
     mock_dt.now.return_value = mock_now
     return mock_dt

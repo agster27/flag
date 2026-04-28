@@ -12,7 +12,7 @@ runs without touching the filesystem or requiring root.
 import sys
 import os
 import unittest
-from datetime import time as _time
+from datetime import time as datetime_time
 from unittest.mock import MagicMock, patch, call
 
 # Ensure the repo root is on the path so schedule_sonos can be imported.
@@ -30,7 +30,7 @@ def _mock_datetime_before_colors():
     at 08:00.  This keeps the existing reschedule-run tests deterministic.
     """
     mock_now = MagicMock()
-    mock_now.time.return_value = _time(1, 0)
+    mock_now.time.return_value = datetime_time(1, 0)
     mock_dt = MagicMock()
     mock_dt.now.return_value = mock_now
     return mock_dt
