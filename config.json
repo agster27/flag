@@ -23,11 +23,6 @@
       "time": "07:59"
     },
     {
-      "name": "morning-carry-on",
-      "audio_url": "http://flag.aghy.home:8000/carry_on.mp3",
-      "time": "08:01"
-    },
-    {
       "name": "evening-first-call",
       "audio_url": "http://flag.aghy.home:8000/first_call.mp3",
       "time": "sunset-5min"
@@ -36,11 +31,6 @@
       "name": "evening-colors",
       "audio_url": "http://flag.aghy.home:8000/evening_colors.mp3",
       "time": "sunset-1min"
-    },
-    {
-      "name": "evening-carry-on",
-      "audio_url": "http://flag.aghy.home:8000/carry_on.mp3",
-      "time": "sunset+1min"
     },
     {
       "name": "taps",
