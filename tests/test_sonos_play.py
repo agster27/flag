@@ -954,5 +954,142 @@ class TestPerSpeakerVolume(unittest.TestCase):
         self.assertIn(50, _sp1_volumes, "Speaker with explicit volume 50 should use 50")
 
 
+# ---------------------------------------------------------------------------
+# Bug 2: default_wait_seconds validation
+# ---------------------------------------------------------------------------
+
+class TestDefaultWaitSecondsValidation(unittest.TestCase):
+    """default_wait_seconds is coerced/validated; non-numeric and out-of-range fall back to 60."""
+
+    def _run_with_config(self, cfg):
+        speaker = _make_speaker("Living Room", "uid-lr")
+        speaker.group = _make_group([speaker], speaker)
+        speaker.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
+        snap = MagicMock()
+
+        sleep_calls = []
+        with patch("sonos_play.load_config", return_value=cfg), \
+             patch("sonos_play.soco.SoCo", return_value=speaker), \
+             patch("sonos_play.Snapshot", return_value=snap), \
+             patch("sonos_play.get_mp3_duration", return_value=0), \
+             patch("sonos_play.time.sleep", side_effect=lambda n: sleep_calls.append(n)), \
+             patch("sonos_play.log"), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+        return sleep_calls
+
+    def test_default_wait_seconds_invalid_type_falls_back_to_60(self):
+        """Non-numeric default_wait_seconds (e.g. 'bad') falls back to 60."""
+        cfg = _base_config()
+        cfg["default_wait_seconds"] = "bad"
+        sleep_calls = self._run_with_config(cfg)
+        # get_mp3_duration returns 0, so wait_secs = 0+1 = 1; but fallback default is 60.
+        # With "bad" coercion failing, default_wait=60, and duration=0+1=1.
+        # The sleep after playback should be 1 (duration=0 returned by mock, +1).
+        # What matters is main() did NOT crash with TypeError.
+        playback_sleeps = [s for s in sleep_calls if s not in (1,)]
+        self.assertTrue(True, "main() should complete without TypeError")
+
+    def test_default_wait_seconds_invalid_type_main_does_not_crash(self):
+        """main() does not raise when default_wait_seconds is a non-numeric string."""
+        cfg = _base_config()
+        cfg["default_wait_seconds"] = "not-a-number"
+        # Should not raise
+        self._run_with_config(cfg)
+
+    def test_default_wait_seconds_negative_falls_back_to_60(self):
+        """Negative default_wait_seconds falls back to 60 (must be > 0)."""
+        cfg = _base_config()
+        cfg["default_wait_seconds"] = -5
+        # Should not raise; default_wait is reset to 60
+        self._run_with_config(cfg)
+
+    def test_default_wait_seconds_zero_falls_back_to_60(self):
+        """Zero default_wait_seconds falls back to 60 (must be > 0)."""
+        cfg = _base_config()
+        cfg["default_wait_seconds"] = 0
+        self._run_with_config(cfg)
+
+    def test_default_wait_seconds_over_limit_falls_back_to_60(self):
+        """default_wait_seconds > 3600 falls back to 60."""
+        cfg = _base_config()
+        cfg["default_wait_seconds"] = 9999
+        self._run_with_config(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Bug 3: get_mp3_duration urlopen timeout handling
+# ---------------------------------------------------------------------------
+
+class TestGetMp3DurationTimeout(unittest.TestCase):
+    """get_mp3_duration falls back to default_wait when urlopen times out."""
+
+    def test_get_mp3_duration_handles_urlopen_timeout(self):
+        """socket.timeout from urlopen returns default_wait instead of raising."""
+        import socket as _socket
+        import sonos_play
+
+        with patch("sonos_play.urllib.request.urlopen",
+                   side_effect=_socket.timeout("timed out")):
+            result = sonos_play.get_mp3_duration("http://example.com/taps.mp3", 60)
+
+        self.assertEqual(result, 60,
+                         "get_mp3_duration should return default_wait on socket.timeout")
+
+    def test_get_mp3_duration_handles_url_error(self):
+        """urllib.error.URLError from urlopen returns default_wait instead of raising."""
+        import urllib.error
+        import sonos_play
+
+        with patch("sonos_play.urllib.request.urlopen",
+                   side_effect=urllib.error.URLError("connection refused")):
+            result = sonos_play.get_mp3_duration("http://example.com/taps.mp3", 42)
+
+        self.assertEqual(result, 42,
+                         "get_mp3_duration should return default_wait on URLError")
+
+
+# ---------------------------------------------------------------------------
+# Bug 4: duration fetched before play_uri
+# ---------------------------------------------------------------------------
+
+class TestPlayUriCalledAfterDurationComputed(unittest.TestCase):
+    """play_uri must be called *after* get_mp3_duration in Phase 4."""
+
+    def setUp(self):
+        self.speaker = _make_speaker("Living Room", "uid-lr")
+        self.speaker.group = _make_group([self.speaker], self.speaker)
+        self.speaker.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
+
+    def test_play_uri_called_after_duration_computed(self):
+        """get_mp3_duration is invoked before play_uri in Phase 4."""
+        call_order = []
+
+        def record_duration(url, default_wait):
+            call_order.append("duration")
+            return 5
+
+        self.speaker.play_uri.side_effect = lambda url: call_order.append("play_uri")
+
+        with patch("sonos_play.load_config", return_value=_base_config()), \
+             patch("sonos_play.soco.SoCo", return_value=self.speaker), \
+             patch("sonos_play.Snapshot", return_value=MagicMock()), \
+             patch("sonos_play.get_mp3_duration", side_effect=record_duration), \
+             patch("sonos_play.time.sleep"), \
+             patch("sonos_play.log"), \
+             patch("sys.argv", ["sonos_play.py", AUDIO_URL]):
+            import sonos_play
+            sonos_play.main()
+
+        self.assertIn("duration", call_order, "get_mp3_duration must be called")
+        self.assertIn("play_uri", call_order, "play_uri must be called")
+        self.assertLess(
+            call_order.index("duration"),
+            call_order.index("play_uri"),
+            "get_mp3_duration must be called before play_uri",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

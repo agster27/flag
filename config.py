@@ -3,6 +3,9 @@ config.py — Central configuration loader for the flag project.
 
 Defines install paths and provides load_config() for reading config.json.
 
+**Python ≥ 3.9 is required** (uses ``zoneinfo`` from the standard library and
+PEP 585 generic aliases such as ``list[str]`` in type annotations).
+
 The ``speakers`` key in config.json may be either:
 
 * **Legacy format** — a JSON array of IP address strings::
@@ -26,6 +29,11 @@ Use :func:`speaker_ips` to extract a plain list of IP strings from either format
 import json
 import logging
 import os
+
+try:
+    import zoneinfo
+except ImportError:
+    zoneinfo = None  # type: ignore[assignment]  # Python < 3.9
 
 INSTALL_DIR = os.environ.get("FLAG_INSTALL_DIR", "/opt/flag")
 CONFIG_PATH = os.environ.get("FLAG_CONFIG", os.path.join(INSTALL_DIR, "config.json"))
@@ -150,11 +158,17 @@ def validate_config(cfg: dict) -> None:
 
     tz = cfg.get("timezone")
     if tz is not None:
-        try:
-            import zoneinfo
-            zoneinfo.ZoneInfo(tz)
-        except (zoneinfo.ZoneInfoNotFoundError, KeyError):
-            _log.warning("Config 'timezone' %r does not appear to be a valid IANA timezone.", tz)
+        if zoneinfo is None:
+            _log.debug(
+                "Skipping timezone validation: zoneinfo module unavailable (Python < 3.9)."
+            )
+        else:
+            try:
+                zoneinfo.ZoneInfo(tz)
+            except (LookupError, ValueError, TypeError):
+                _log.warning(
+                    "Config 'timezone' %r does not appear to be a valid IANA timezone.", tz
+                )
 
 
 def load_config(path=None):

@@ -38,6 +38,7 @@ import glob as _glob
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -147,41 +148,6 @@ def get_location(config):
     longitude = config.get("longitude", -74.0060)
     timezone = config.get("timezone") or get_system_timezone()
     return LocationInfo(city, country, timezone, latitude, longitude)
-
-
-def local_to_utc_hm(hour, minute, tz_name):
-    """
-    Convert a local wall-clock time (today) to UTC hour and minute.
-
-    Handles DST transitions: non-existent times (spring-forward) use the DST
-    interpretation; ambiguous times (fall-back) use standard time.
-
-    .. note::
-        This function is retained for reference but is **no longer used** in
-        the main scheduling flow. systemd ``OnCalendar=`` natively interprets
-        times in the system's local timezone, so no UTC conversion is needed.
-
-    Args:
-        hour (int): Local hour (0–23).
-        minute (int): Local minute (0–59).
-        tz_name (str): IANA timezone name (e.g. ``"America/New_York"``).
-
-    Returns:
-        tuple[int, int]: ``(hour, minute)`` in UTC.
-    """
-    tz = pytz.timezone(tz_name)
-    now = datetime.now(tz)
-    naive_dt = datetime(now.year, now.month, now.day, hour, minute)
-    try:
-        local_dt = tz.localize(naive_dt, is_dst=None)
-    except pytz.exceptions.NonExistentTimeError:
-        # Clocks spring forward — this wall time doesn't exist; use DST side.
-        local_dt = tz.localize(naive_dt, is_dst=True)
-    except pytz.exceptions.AmbiguousTimeError:
-        # Clocks fall back — time occurs twice; use standard-time side.
-        local_dt = tz.localize(naive_dt, is_dst=False)
-    utc_dt = local_dt.astimezone(pytz.utc)
-    return utc_dt.hour, utc_dt.minute
 
 
 def get_sunset_local_time(config):
@@ -315,7 +281,15 @@ def resolve_schedules(config):
         ``"audio_url"``, and ``"time"`` keys.
     """
     if "schedules" in config:
-        return config["schedules"]
+        schedules = config["schedules"]
+        if not isinstance(schedules, list) or not schedules:
+            _log.error(
+                "Config 'schedules' must be a non-empty list; got %r. Nothing to schedule.",
+                schedules,
+            )
+            print("❌ Config 'schedules' must be a non-empty list. Nothing to schedule.")
+            return []
+        return schedules
 
     # Backward compatibility: synthesise from legacy flat keys
     if "colors_url" in config or "taps_url" in config:
@@ -426,7 +400,7 @@ def _build_service_unit(name, audio_url):
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
-        f'ExecStart=/usr/bin/flock -n /run/flag.lock {PYTHON_BIN} {SONOS_PLAY} "{audio_url}"\n'
+        f"ExecStart=/usr/bin/flock -n /run/flag.lock {PYTHON_BIN} {SONOS_PLAY} {shlex.quote(audio_url)}\n"
         "User=root\n"
     )
 
@@ -777,6 +751,12 @@ def main():
         time_val = entry.get("time")
         if not audio_url:
             print(f"  ⚠️  Skipping '{name}': missing required 'audio_url' field in schedule entry.")
+            continue
+        if not isinstance(audio_url, str) or (
+            not audio_url.startswith("http://") and not audio_url.startswith("https://")
+        ):
+            _log.warning("Skipping '%s': audio_url %r is not a valid http/https URL.", name, audio_url)
+            print(f"  ⚠️  Skipping '{name}': audio_url must start with http:// or https://.")
             continue
         if not time_val:
             print(f"  ⚠️  Skipping '{name}': missing required 'time' field in schedule entry.")
