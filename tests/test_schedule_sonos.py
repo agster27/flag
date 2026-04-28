@@ -12,10 +12,28 @@ runs without touching the filesystem or requiring root.
 import sys
 import os
 import unittest
+from datetime import time as _time
 from unittest.mock import MagicMock, patch, call
 
 # Ensure the repo root is on the path so schedule_sonos can be imported.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _mock_datetime_before_colors():
+    """
+    Return a mock that replaces schedule_sonos.datetime so that
+    datetime.now(tz).time() returns 01:00 — before the 'colors' timer fires
+    at 08:00.  This keeps the existing reschedule-run tests deterministic.
+    """
+    mock_now = MagicMock()
+    mock_now.time.return_value = _time(1, 0)
+    mock_dt = MagicMock()
+    mock_dt.now.return_value = mock_now
+    return mock_dt
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +89,9 @@ class TestRescheduleRun(unittest.TestCase):
         """
         Run schedule_sonos.main() with all timers already enabled.
         Returns the list of _run_systemctl call arg-tuples.
+
+        datetime.now is mocked to 01:00 so that the 'colors' timer (08:00)
+        is always in the future, keeping this helper deterministic.
         """
         import schedule_sonos
 
@@ -80,6 +101,7 @@ class TestRescheduleRun(unittest.TestCase):
              patch("schedule_sonos._clean_stale_units"), \
              patch("schedule_sonos.get_sunset_local_time", return_value=(19, 39)), \
              patch("schedule_sonos._is_timer_enabled", return_value=True), \
+             patch("schedule_sonos.datetime", _mock_datetime_before_colors()), \
              patch("schedule_sonos._run_systemctl") as mock_ctl:
             schedule_sonos.main()
         return _systemctl_calls(mock_ctl)
@@ -220,6 +242,9 @@ class TestRescheduleOptimization(unittest.TestCase):
 
         Returns:
             list of _run_systemctl call arg-tuples.
+
+        datetime.now is mocked to 01:00 so that the 'colors' timer (08:00)
+        is always in the future, keeping this helper deterministic.
         """
         import schedule_sonos
 
@@ -231,6 +256,7 @@ class TestRescheduleOptimization(unittest.TestCase):
              patch("schedule_sonos._is_timer_enabled", return_value=True), \
              patch("schedule_sonos._unit_file_content_matches",
                    return_value=unit_file_matches), \
+             patch("schedule_sonos.datetime", _mock_datetime_before_colors()), \
              patch("schedule_sonos._run_systemctl") as mock_ctl:
             schedule_sonos.main()
         return _systemctl_calls(mock_ctl)
