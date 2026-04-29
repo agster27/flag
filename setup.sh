@@ -8,7 +8,7 @@
 set -e
 set -o pipefail
 
-SETUP_VERSION="2.4.3"
+SETUP_VERSION="2.5.0"
 
 # Menu option numbers — single source of truth so messages never drift.
 readonly MENU_LIST=1
@@ -18,9 +18,10 @@ readonly MENU_LOGS=4
 readonly MENU_INSTALL=5
 readonly MENU_UPGRADE=6
 readonly MENU_RECONFIG=7
-readonly MENU_MANAGE=8
-readonly MENU_UNINSTALL=9
-readonly MENU_EXIT=10
+readonly MENU_RELOAD=8
+readonly MENU_MANAGE=9
+readonly MENU_UNINSTALL=10
+readonly MENU_EXIT=11
 
 # ---------------------------------------------------------------------------
 # Table of contents
@@ -35,7 +36,7 @@ readonly MENU_EXIT=10
 #   Install state:   detect_install_state, show_install_required_msg,
 #                    _require_install, _resolve_speaker_names
 #   Menu:            prompt_menu
-#   Lifecycle:       install_fresh, upgrade_scripts, uninstall_all
+#   Lifecycle:       install_fresh, upgrade_scripts, reload_config, uninstall_all
 #   CLI parsing:     _print_usage + arg dispatch
 #   Main loop:       (bottom of file)
 # ---------------------------------------------------------------------------
@@ -1580,6 +1581,7 @@ function prompt_menu() {
     local _logs_label="View logs"
     local _upgrade_label="Upgrade (update scripts, keep config)"
     local _reconfig_label="Reconfigure (edit config.json interactively)"
+    local _reload_label="Reload config (apply config.json changes)"
     local _manage_label="Manage scheduled plays (add / edit / remove)"
 
     if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
@@ -1589,6 +1591,7 @@ function prompt_menu() {
         _test_label="Test Sonos playback  (requires install)"
         _logs_label="View logs  (requires install)"
         _upgrade_label="Upgrade (update scripts, keep config)  (requires install)"
+        _reload_label="Reload config (apply config.json changes)  (requires install)"
         _manage_label="Manage scheduled plays (add / edit / remove)  (requires install)"
     fi
 
@@ -1607,14 +1610,15 @@ function prompt_menu() {
     echo "  5) $_install_label"
     echo "  6) $_upgrade_label"
     echo "  7) $_reconfig_label"
-    echo "  8) $_manage_label"
+    echo "  8) $_reload_label"
+    echo "  9) $_manage_label"
     echo ""
     echo "  ── Danger zone ────────────────────────"
-    echo "  9) Uninstall completely"
+    echo "  10) Uninstall completely"
     echo ""
-    echo "  10) Exit without doing anything"
+    echo "  11) Exit without doing anything"
     echo ""
-    read -rp "Enter your choice [1-10]: " CHOICE
+    read -rp "Enter your choice [1-11]: " CHOICE
 }
 
 # ---------------------------------------------------------------------------
@@ -2148,6 +2152,56 @@ function upgrade_scripts() {
 }
 
 # ---------------------------------------------------------------------------
+# Reload — re-applies the current config.json without running the full wizard.
+# ---------------------------------------------------------------------------
+function reload_config() {
+    # Validate prerequisites
+    if [ ! -f "$CONFIG_FILE" ]; then
+        log "❌ $CONFIG_FILE not found. Please run Install (option ${MENU_INSTALL}) first."
+        read -rp "  Press Enter to return to menu..." _pause
+        return
+    fi
+    if [ ! -d "$VENV_DIR" ]; then
+        log "❌ Python venv not found at $VENV_DIR. Please run Install (option ${MENU_INSTALL}) first."
+        read -rp "  Press Enter to return to menu..." _pause
+        return
+    fi
+    if ! command -v jq &>/dev/null; then
+        log "❌ jq is not installed. Please run Install (option ${MENU_INSTALL}) first."
+        read -rp "  Press Enter to return to menu..." _pause
+        return
+    fi
+    if ! jq empty "$CONFIG_FILE" 2>/dev/null; then
+        log "❌ $CONFIG_FILE is not valid JSON. Please fix it before reloading."
+        read -rp "  Press Enter to return to menu..." _pause
+        return
+    fi
+
+    echo ""
+    echo "============================================"
+    echo "  Reload Configuration"
+    echo "============================================"
+
+    PORT=$(jq -r '.port' "$CONFIG_FILE")
+    write_service_file
+    maybe_sudo systemctl enable flag-audio-http
+    if maybe_sudo systemctl restart flag-audio-http 2>/dev/null; then
+        log "✅ flag-audio-http restarted successfully."
+    else
+        log "⚠️  flag-audio-http restart failed (service may not be running yet)."
+    fi
+
+    log "🗓️  Regenerating systemd timer units..."
+    maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
+
+    # Invalidate per-day sunset cache so the menu header reflects any changes
+    _SUNSET_CACHE_DATE=""
+    _SUNSET_CACHE_LINE=""
+
+    log "✅ Reload complete."
+}
+
+# ---------------------------------------------------------------------------
 # CLI argument parsing — must come after all function definitions so that
 # calling uninstall_all here works correctly.
 # ---------------------------------------------------------------------------
@@ -2259,6 +2313,12 @@ while true; do
                 fi
                 log "✅ Reconfiguration complete."
             fi
+            ;;
+        "$MENU_RELOAD")
+            _require_install || continue
+            reload_config
+            echo ""
+            read -rp "  Press Enter to return to menu..." _pause
             ;;
         "$MENU_MANAGE")
             _require_install || continue
