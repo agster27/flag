@@ -604,13 +604,13 @@ def _build_boot_reschedule_service(schedule_names=None, sunset_names=None):
         "Description=Flag Audio — recompute sunset timers on boot\n"
         "After=network-online.target\n"
         "Wants=network-online.target\n"
-        + before_line +
-        "\n"
+        + before_line
+        + "\n"
         "[Service]\n"
         "Type=oneshot\n"
         f"ExecStart={PYTHON_BIN} {SCHEDULE_SCRIPT}\n"
-        + exec_start_post_line +
-        "RemainAfterExit=no\n"
+        + exec_start_post_line
+        + "RemainAfterExit=no\n"
         "User=root\n"
         "\n"
         "[Install]\n"
