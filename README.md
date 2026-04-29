@@ -89,13 +89,12 @@ chmod +x setup.sh
   6) Upgrade (update scripts, keep config)
   7) Reconfigure (edit config.json interactively)
   8) Reload config (apply config.json changes)
-  9) Switch scheduling backend (systemd timers ↔ cron)
-  10) Manage scheduled plays (add / edit / remove)
+  9) Manage scheduled plays (add / edit / remove)
 
   ── Danger zone ────────────────────────
-  11) Uninstall completely
+  10) Uninstall completely
 
-  12) Exit without doing anything
+  11) Exit without doing anything
 ```
 
 > **Install state detection:** When `setup.sh` loads, it automatically checks for the Python virtual environment (`/opt/flag/sonos-env`), the config file (`/opt/flag/config.json`), and active systemd timers. If any component is missing, a warning is displayed above the menu with guidance on which option to select. On a fresh system, the "Install" option is marked with `← start here` and options that require a working installation are annotated with `(requires install)`.
@@ -110,10 +109,9 @@ chmod +x setup.sh
 | **6** | Upgrade — downloads latest scripts from GitHub and upgrades pip packages; **preserves your existing `config.json`** |
 | **7** | Reconfigure — re-runs the config wizard to edit settings and regenerate timers |
 | **8** | Reload config — applies `config.json` changes without a full reconfigure |
-| **9** | Switch scheduling backend — toggle between systemd timers (default) and cron (see [Scheduling Backend](#-scheduling-backend)) |
-| **10** | Manage scheduled plays — interactive sub-menu to add, edit, or remove schedule entries and immediately regenerate timers |
-| **11** | Uninstall — removes all files, systemd services, and timers |
-| **12** | Exit without making any changes |
+| **9** | Manage scheduled plays — interactive sub-menu to add, edit, or remove schedule entries and immediately regenerate timers |
+| **10** | Uninstall — removes all files, systemd services, and timers |
+| **11** | Exit without making any changes |
 
 > The script will automatically download all required files from GitHub using wget (no `git clone` needed), create a Python virtual environment, install dependencies, and generate a default `config.json` if needed.
 
@@ -401,50 +399,6 @@ The service exits non-zero (systemd marks it failed), but no audio plays. You ca
 
 ```bash
 journalctl -u flag-evening_colors -n 20
-```
-
----
-
-## 🔀 Scheduling Backend
-
-The system supports two scheduling backends. Switch via **option 9** in the setup menu.
-
-### systemd timers (default)
-
-Precise to the second. No polling. Sunset entries use a static `OnCalendar=*-*-* 03:00:00` timer that starts a sleep-until-sunset wrapper service. The service computes today's actual sunset and sleeps until that moment before playing.
-
-**Trade-offs:** Slightly more complex than cron; timer unit files must be managed by `schedule_sonos.py`. The daemon-reload race (the original bug) is now structurally eliminated because sunset timer files are static and never rewritten during the daily 02:00 run.
-
-### cron
-
-Installs a single `/etc/cron.d/flag` file. Fixed-time schedules get one cron entry at their configured HH:MM. Sunset entries get a cron entry that runs every minute between 17:00–23:00 local time; the play guard refuses every minute except the actual sunset minute (±`play_guard_tolerance_minutes`).
-
-**Trade-offs:** Polling once per minute in the evening (~360 extra Python launches per day). No `daemon-reload` involved at all. Simpler to inspect (`cat /etc/cron.d/flag`). Good choice if you have had repeated systemd timer issues and want peace of mind.
-
-To switch:
-
-```bash
-./setup.sh
-# Choose option 9: Switch scheduling backend (systemd timers ↔ cron)
-# Choose option 2: Switch to cron
-```
-
-To switch back:
-
-```bash
-./setup.sh
-# Choose option 9
-# Choose option 1: Switch to systemd timers
-```
-
-The current backend is shown in the menu header:
-
-```
-  Backend: ⏰ cron (/etc/cron.d/flag)
-```
-or
-```
-  Backend: 🕒 systemd timers
 ```
 
 ---
