@@ -88,12 +88,14 @@ chmod +x setup.sh
   5) Install (first-time setup)
   6) Upgrade (update scripts, keep config)
   7) Reconfigure (edit config.json interactively)
-  8) Manage scheduled plays (add / edit / remove)
+  8) Reload config (apply config.json changes)
+  9) Switch scheduling backend (systemd timers ↔ cron)
+  10) Manage scheduled plays (add / edit / remove)
 
   ── Danger zone ────────────────────────
-  9) Uninstall completely
+  11) Uninstall completely
 
-  10) Exit without doing anything
+  12) Exit without doing anything
 ```
 
 > **Install state detection:** When `setup.sh` loads, it automatically checks for the Python virtual environment (`/opt/flag/sonos-env`), the config file (`/opt/flag/config.json`), and active systemd timers. If any component is missing, a warning is displayed above the menu with guidance on which option to select. On a fresh system, the "Install" option is marked with `← start here` and options that require a working installation are annotated with `(requires install)`.
@@ -107,9 +109,11 @@ chmod +x setup.sh
 | **5** | Install (first-time setup) — installs system deps, downloads files, creates venv, runs config wizard, writes systemd timers |
 | **6** | Upgrade — downloads latest scripts from GitHub and upgrades pip packages; **preserves your existing `config.json`** |
 | **7** | Reconfigure — re-runs the config wizard to edit settings and regenerate timers |
-| **8** | Manage scheduled plays — interactive sub-menu to add, edit, or remove schedule entries and immediately regenerate systemd timers |
-| **9** | Uninstall — removes all files, systemd services, and timers |
-| **10** | Exit without making any changes |
+| **8** | Reload config — applies `config.json` changes without a full reconfigure |
+| **9** | Switch scheduling backend — toggle between systemd timers (default) and cron (see [Scheduling Backend](#-scheduling-backend)) |
+| **10** | Manage scheduled plays — interactive sub-menu to add, edit, or remove schedule entries and immediately regenerate timers |
+| **11** | Uninstall — removes all files, systemd services, and timers |
+| **12** | Exit without making any changes |
 
 > The script will automatically download all required files from GitHub using wget (no `git clone` needed), create a Python virtual environment, install dependencies, and generate a default `config.json` if needed.
 
@@ -147,13 +151,15 @@ After setup, your `/opt/flag/` folder should look like:
 flag-first_call.service     / flag-first_call.timer       # First Call at 07:55
 flag-morning_colors.service / flag-morning_colors.timer   # Morning Colors at 08:00
 flag-carry_on.service       / flag-carry_on.timer         # Carry On at 08:01
-flag-retreat.service        / flag-retreat.timer          # Retreat at sunset−5 min (updated daily)
-flag-evening_colors.service / flag-evening_colors.timer   # Evening Colors at sunset (updated daily)
+flag-retreat.service        / flag-retreat.timer          # Retreat — static 03:00 timer, sleeps to sunset−5 min
+flag-evening_colors.service / flag-evening_colors.timer   # Evening Colors — static 03:00 timer, sleeps to sunset
 flag-taps.service           / flag-taps.timer             # Taps at 22:00
-flag-reschedule.service / flag-reschedule.timer  # Daily 02:00 — recalculates sunset
-flag-boot-reschedule.service                     # Oneshot on boot — recomputes sunset before timers fire
+flag-reschedule.service / flag-reschedule.timer  # Daily 02:00 — checks for config changes
+flag-boot-reschedule.service                     # Oneshot on boot — starts sunset services for today
 flag-audio-http.service                          # HTTP audio file server
 ```
+
+> **Sunset timers are now static:** As of this release, sunset-based timer unit files have a fixed `OnCalendar=*-*-* 03:00:00`. The service computes today's actual sunset time at runtime via `--sleep-until-schedule` and sleeps until that moment. Because the timer files never change, `daemon-reload` is never called for sunset entries during the 02:00 reschedule run — eliminating the race condition that caused the 2026-04-29 2 AM misfire.
 
 ---
 
@@ -253,6 +259,8 @@ This means if Speaker A was playing Spotify before Colors, it will resume playin
 | `latitude` / `longitude` | Your coordinates, used to calculate local sunset time |
 | `timezone` | IANA timezone name (e.g. `"America/New_York"`) |
 | `sunset_offset_minutes` | Optional offset in minutes applied only to the plain `"sunset"` time string (negative = before, positive = after). Defaults to `0`. This value is **ignored** when a per-entry `"sunset±Nmin"` offset is used; those entries are always relative to true sunset. |
+| `play_guard_enabled` | If `false`, skip the time-of-day play guard entirely (default: `true`). **Not recommended.** |
+| `play_guard_tolerance_minutes` | How many minutes either side of a scheduled fire time counts as "on time" (default: `2`). Must be a positive integer. |
 
 ### `speakers` array
 
@@ -301,7 +309,7 @@ Each entry in `schedules` defines one scheduled audio play:
 | `"sunset-Nmin"` | `"sunset-5min"` | N minutes **before** true sunset (1–720). The top-level `sunset_offset_minutes` is **ignored**; the N is an absolute offset from actual sunset. |
 | `"sunset+Nmin"` | `"sunset+1min"` | N minutes **after** true sunset (1–720). The top-level `sunset_offset_minutes` is **ignored**; the N is an absolute offset from actual sunset. |
 
-Sunset-offset timers (`sunset-Nmin` / `sunset+Nmin`) are treated the same as plain `"sunset"` timers for scheduling purposes — they are recomputed daily at 02:00 by `flag-reschedule.timer` and on every boot by `flag-boot-reschedule.service`, with no stop/start cycle required.
+Sunset-offset timers (`sunset-Nmin` / `sunset+Nmin`) use the same static 03:00 timer approach — the actual fire time is computed at runtime inside each service, so no daily unit-file rewrite is needed.
 
 > **Note:** The `sunset` keyword and the `sunset±Nmin` syntax are matched **case-insensitively** — `"Sunset"`, `"SUNSET"`, `"Sunset-5min"`, and `"sunset-5MIN"` are all accepted. Leading/trailing whitespace is stripped automatically. Plain `"HH:MM"` strings are also whitespace-tolerant (e.g. `" 08:00 "` works).
 
@@ -353,9 +361,91 @@ To add a new scheduled audio play (e.g., a noon mess call):
 
 ## 🔄 Boot recovery
 
-When the LXC container starts (after a reboot, host outage, or migration), `flag-boot-reschedule.service` runs once to recompute today's sunset and rewrite the sunset timer's `OnCalendar` value. Combined with `Persistent=false` on all timers, this means: after any outage, schedules resume cleanly at their next correct fire time, and no missed play is ever replayed late.
+When the LXC container starts (after a reboot, host outage, or migration), `flag-boot-reschedule.service` runs once. It starts each sunset sleep-wrapper service immediately so today's sunset plays still happen, even though the static 03:00 timer hasn't fired yet. If it is already past sunset, the wrapper services exit silently. Combined with `Persistent=false` on all timers, this means: after any outage, schedules resume cleanly at their next correct fire time, and no missed play is ever replayed late.
 
 > **Missed plays are intentionally skipped, never replayed later.** If the container or host is down at the scheduled time, that play is simply missed — there is no catch-up audio at an unexpected hour.
+
+---
+
+## 🛡️ Play Guard
+
+`sonos_play.py` includes a **time-of-day play guard** that runs before any speaker discovery or playback. The guard reads all schedules from `config.json`, computes today's local fire time for each entry (including sunset-based ones), and **refuses to play** if the current time is not within `±play_guard_tolerance_minutes` of at least one scheduled fire time.
+
+**Why this matters:** The guard is the primary defense against spurious plays caused by systemd bugs (e.g., a `daemon-reload` on an already-active timer with a mutated `OnCalendar` can cause systemd to fire the service immediately). The 2026-04-29 2 AM incident was caused by exactly this bug — the play guard would have prevented it.
+
+### Guard config keys
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `play_guard_enabled` | `true` | Set to `false` to disable the guard entirely (not recommended). |
+| `play_guard_tolerance_minutes` | `2` | Number of minutes either side of a scheduled fire time that counts as "on time". |
+
+### Guard bypass
+
+The guard is bypassed in three ways:
+
+- **`--ignore-guard` CLI flag** — used by `setup.sh` option 3 (Test Sonos Playback) and the sunset sleep-wrapper path.
+- **`play_guard_enabled: false` in config.json** — permanent per-install opt-out.
+- **`allow_quiet_hours_play: true` in config.json** — legacy bypass key (kept for backward compatibility).
+
+### Log output on guard refusal
+
+When the guard refuses a play you will see a log line like:
+
+```
+ERROR: play_guard refused to play http://10.0.40.233:8000/evening_colors.mp3 at 02:00:26
+       — no scheduled fire time within ±2 min.  This is likely a systemd misfire; aborting.
+```
+
+The service exits non-zero (systemd marks it failed), but no audio plays. You can investigate via:
+
+```bash
+journalctl -u flag-evening_colors -n 20
+```
+
+---
+
+## 🔀 Scheduling Backend
+
+The system supports two scheduling backends. Switch via **option 9** in the setup menu.
+
+### systemd timers (default)
+
+Precise to the second. No polling. Sunset entries use a static `OnCalendar=*-*-* 03:00:00` timer that starts a sleep-until-sunset wrapper service. The service computes today's actual sunset and sleeps until that moment before playing.
+
+**Trade-offs:** Slightly more complex than cron; timer unit files must be managed by `schedule_sonos.py`. The daemon-reload race (the original bug) is now structurally eliminated because sunset timer files are static and never rewritten during the daily 02:00 run.
+
+### cron
+
+Installs a single `/etc/cron.d/flag` file. Fixed-time schedules get one cron entry at their configured HH:MM. Sunset entries get a cron entry that runs every minute between 17:00–23:00 local time; the play guard refuses every minute except the actual sunset minute (±`play_guard_tolerance_minutes`).
+
+**Trade-offs:** Polling once per minute in the evening (~360 extra Python launches per day). No `daemon-reload` involved at all. Simpler to inspect (`cat /etc/cron.d/flag`). Good choice if you have had repeated systemd timer issues and want peace of mind.
+
+To switch:
+
+```bash
+./setup.sh
+# Choose option 9: Switch scheduling backend (systemd timers ↔ cron)
+# Choose option 2: Switch to cron
+```
+
+To switch back:
+
+```bash
+./setup.sh
+# Choose option 9
+# Choose option 1: Switch to systemd timers
+```
+
+The current backend is shown in the menu header:
+
+```
+  Backend: ⏰ cron (/etc/cron.d/flag)
+```
+or
+```
+  Backend: 🕒 systemd timers
+```
 
 ---
 
@@ -376,19 +466,21 @@ You should see `HTTP/1.0 200 OK` in the response headers.
 
 ### 2. Test Sonos Playback Manually
 
-To test playback without waiting for the scheduled time, run:
+To test playback without waiting for the scheduled time, run with `--ignore-guard` to bypass the time-of-day guard:
 
 ```bash
-/opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://<your-pi-ip>:8000/colors.mp3
+/opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py --ignore-guard http://<your-pi-ip>:8000/colors.mp3
 ```
 
 or, for taps:
 
 ```bash
-/opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py http://<your-pi-ip>:8000/taps.mp3
+/opt/flag/sonos-env/bin/python /opt/flag/sonos_play.py --ignore-guard http://<your-pi-ip>:8000/taps.mp3
 ```
 
 If it works, you'll hear the audio play on your configured Sonos speaker(s) and see log output in `/opt/flag/sonos_play.log`.
+
+> **Without `--ignore-guard`:** the play guard will refuse the invocation unless the current time is within ±`play_guard_tolerance_minutes` of a scheduled fire time. Use `--ignore-guard` for all manual/test invocations.
 
 ### 3. Check Installed Timers
 
@@ -443,13 +535,13 @@ cat /opt/flag/setup.log
 - **Check setup log:**  
   `cat /opt/flag/setup.log`
 - **Manually trigger a play (for testing):**  
-  `sudo systemctl start flag-colors.service`
+  `sudo systemctl start flag-morning_colors.service`  
+  Note: this bypasses the play guard. For sunset services, they use `--sleep-until-schedule` and will sleep until actual sunset. To test immediately, use setup.sh option 3 (Test Sonos Playback) which passes `--ignore-guard`.
 - **Sunset timer shows the wrong time?**  
-  The `flag-reschedule` timer recalculates sunset at 02:00 each night. To recalculate immediately:  
-  `sudo /opt/flag/sonos-env/bin/python /opt/flag/schedule_sonos.py`
-- **Why doesn't the reschedule restart the sunset timer?**  
-  By design, the nightly 02:00 reschedule run rewrites the sunset timer's unit file and leaves the timer active across the rewrite. systemd re-reads the updated `OnCalendar` line on `daemon-reload` and re-arms the already-active timer — no explicit `start` or `restart` is needed or safe to use. Starting (or restarting) a sunset timer causes systemd to invoke the associated service immediately — an unwanted audio play. If you ever need to immediately activate the sunset timer manually, run:  
-  `sudo systemctl start flag-taps.timer`
+  Sunset service units compute the fire time at runtime via `--sleep-until-schedule`. To restart a sunset service for today:  
+  `sudo systemctl restart flag-evening_colors.service`
+- **Why doesn't the nightly 02:00 reschedule rewrite sunset timers?**  
+  By design. Sunset timer unit files have a static `OnCalendar=*-*-* 03:00:00` that never changes. The actual sunset time is computed at runtime inside the service. This eliminates the `daemon-reload` race that caused the 2026-04-29 2 AM misfire.
 - **A speaker is not found or unreachable?**  
   `sonos_play.py` logs a warning and skips the unreachable speaker — the remaining reachable speakers continue with synchronized playback. If **all** configured speakers are unreachable, the script exits with a non-zero code (so systemd marks the unit as failed). Check `/opt/flag/sonos_play.log` for `WARNING: Speaker at <IP> is unreachable` messages.
 - **How does grouping work with multiple speakers?**  
