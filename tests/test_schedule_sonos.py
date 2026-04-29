@@ -206,13 +206,24 @@ class TestFirstInstallRun(unittest.TestCase):
 
     def test_no_start_without_enable_on_first_install(self):
         """
-        On first install, bare 'start' calls should not be issued — only
-        'enable --now' (which both enables and starts atomically).
+        On first install, bare 'start' calls on timers must not be issued —
+        timers use 'enable --now' (which both enables and starts atomically).
+
+        Exception: 'start --no-block' is permitted for sunset *services*
+        (not timers) — this immediately starts the sleep-until-sunset wrapper
+        so today's sunset plays still happen even though the static 03:00 timer
+        won't fire until tomorrow.
         """
         calls = self._run_main_first_install()
-        bare_starts = [c for c in calls if c[0] == "start"]
-        self.assertEqual(bare_starts, [],
-                         "First-install run must not issue bare 'start' calls")
+        # Bare start on a .timer (not a .service) is the dangerous operation
+        # that can cause spurious immediate fires.  Permit start --no-block on
+        # services (sunset sleep wrapper for today's plays).
+        bad_timer_starts = [
+            c for c in calls
+            if c[0] == "start" and len(c) >= 2 and c[-1].endswith(".timer")
+        ]
+        self.assertEqual(bad_timer_starts, [],
+                         "First-install run must not issue bare 'start' calls on timers")
 
     def test_daemon_reload_called(self):
         """daemon-reload must be called during a first-install run."""

@@ -405,6 +405,47 @@ def _build_service_unit(name, audio_url):
     )
 
 
+def _build_sunset_service_unit(name, audio_url):
+    """
+    Return the content of a systemd ``.service`` unit for a sunset-based schedule.
+
+    Unlike fixed-time services (which embed the pre-computed play time in the
+    timer's ``OnCalendar``), sunset service units invoke ``sonos_play.py`` with the
+    ``--sleep-until-schedule`` flag.  The script reads ``config.json`` at runtime,
+    computes today's actual fire time (handling ``sunset`` / ``sunset±Nmin``), and
+    sleeps until that moment before playing.
+
+    Because the service content only contains the *static* schedule name and URL
+    (not the computed sunset time), this file never needs to be rewritten once
+    written, which eliminates the ``daemon-reload`` race described in the module
+    docstring.
+
+    The service is ``Type=simple`` (not ``Type=oneshot``) because the process is
+    long-running (it sleeps until sunset).  The ``flock`` is acquired *inside*
+    ``sonos_play.py`` at play time (not during the sleep), so multiple sunset
+    services can sleep concurrently without blocking each other.
+
+    Args:
+        name (str): Sanitised schedule name.
+        audio_url (str): Full HTTP URL of the MP3 to play.
+
+    Returns:
+        str: Unit file content ready to be written to disk.
+    """
+    return (
+        "[Unit]\n"
+        f"Description=Flag Audio — sleep until sunset then play {name}\n"
+        "After=network-online.target flag-audio-http.service\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"ExecStart={PYTHON_BIN} {SONOS_PLAY} --sleep-until-schedule {shlex.quote(name)} {shlex.quote(audio_url)}\n"
+        "Restart=no\n"
+        "User=root\n"
+    )
+
+
 def _build_timer_unit(name, hour, minute):
     """
     Return the content of a systemd ``.timer`` unit that fires at a given local time.
@@ -431,6 +472,39 @@ def _build_timer_unit(name, hour, minute):
         "\n"
         "[Timer]\n"
         f"OnCalendar=*-*-* {hour:02d}:{minute:02d}:00\n"
+        "Persistent=false\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+
+
+def _build_sunset_timer_unit(name):
+    """
+    Return the content of a STATIC systemd ``.timer`` unit for a sunset-based schedule.
+
+    This timer fires every day at **03:00** local time.  The actual sunset play
+    time is computed at runtime by the corresponding service unit (which uses
+    ``sonos_play.py --sleep-until-schedule``).
+
+    Because this file's ``OnCalendar`` value is a fixed constant that never
+    changes, ``schedule_sonos.py`` does **not** need to rewrite or reload this
+    file during the daily 02:00 reschedule run.  This structurally eliminates the
+    race condition where ``daemon-reload`` of an already-active timer (with a
+    mutated ``OnCalendar`` value) causes systemd to fire the service immediately.
+
+    Args:
+        name (str): Sanitised schedule name (used only in ``Description``).
+
+    Returns:
+        str: Unit file content ready to be written to disk.
+    """
+    return (
+        "[Unit]\n"
+        f"Description=Flag Audio Timer — {name} (static 03:00, sleeps to sunset)\n"
+        "\n"
+        "[Timer]\n"
+        "OnCalendar=*-*-* 03:00:00\n"
         "Persistent=false\n"
         "\n"
         "[Install]\n"
@@ -484,7 +558,7 @@ def _build_reschedule_timer():
         "[Install]\n"
         "WantedBy=timers.target\n"
     )
-def _build_boot_reschedule_service(schedule_names=None):
+def _build_boot_reschedule_service(schedule_names=None, sunset_names=None):
     """
     Return the content of the ``flag-boot-reschedule.service`` unit.
 
@@ -494,11 +568,21 @@ def _build_boot_reschedule_service(schedule_names=None):
     outage or reboot, schedules resume at their next correct fire time and no
     missed play is ever replayed late.
 
+    When *sunset_names* is provided, an ``ExecStartPost`` line is generated that
+    immediately starts each sunset service (non-blocking) after the reschedule
+    script completes.  This handles boot recovery for sunset plays when the system
+    boots after the static 03:00 timer has already fired but before sunset — the
+    03:00 timer won't fire again until tomorrow, so we start the sleep-wrapper
+    services explicitly to ensure today's sunset plays still happen.
+
     Args:
         schedule_names (list[str] | None): Sanitised schedule names used to
             generate the ``Before=`` ordering constraint so that this service
             completes before the named schedule timers can fire.  Both ``None``
             and an empty list result in the ``Before=`` line being omitted.
+        sunset_names (list[str] | None): Sanitised names of sunset-based
+            schedules.  When present, ``ExecStartPost`` lines are added to
+            start each sunset service immediately after boot.
 
     Returns:
         str: Unit file content ready to be written to disk.
@@ -507,6 +591,14 @@ def _build_boot_reschedule_service(schedule_names=None):
     if schedule_names:
         before_units = " ".join(f"flag-{n}.timer" for n in schedule_names)
         before_line = f"Before={before_units}\n"
+
+    exec_start_post_line = ""
+    if sunset_names:
+        units = " ".join(f"flag-{n}.service" for n in sorted(sunset_names))
+        exec_start_post_line = (
+            f"ExecStartPost=-/bin/systemctl start --no-block {units}\n"
+        )
+
     return (
         "[Unit]\n"
         "Description=Flag Audio — recompute sunset timers on boot\n"
@@ -517,6 +609,7 @@ def _build_boot_reschedule_service(schedule_names=None):
         "[Service]\n"
         "Type=oneshot\n"
         f"ExecStart={PYTHON_BIN} {SCHEDULE_SCRIPT}\n"
+        + exec_start_post_line +
         "RemainAfterExit=no\n"
         "User=root\n"
         "\n"
@@ -582,28 +675,26 @@ def _is_reschedule_run(schedule_names):
 
     When all ``flag-{name}.timer`` units are already enabled, this script is being
     invoked by the nightly ``flag-reschedule.timer`` to recalculate sunset times.
-    In this mode the write→daemon-reload sequence is used for sunset timers: the new
-    unit file is written atomically and then ``daemon-reload`` is called.  The
-    already-active sunset timer is left alone — systemd re-reads the updated unit
-    file on ``daemon-reload`` and re-arms the *active* timer with the new
-    ``OnCalendar`` value automatically.  No ``stop``/``start`` is required.
 
-    NOTE: the previous approach (PR #43) used stop→write→reload→start for sunset
-    timers.  That caused the timer to fire immediately after ``systemctl start``,
-    even with ``Persistent=false``, because systemd's internal next-elapse
-    calculation can treat today's ``OnCalendar`` event as missed immediately after
-    a stop+reload cycle.  Leaving the timer active and relying on ``daemon-reload``
-    re-arming is the correct fix.
+    In the new design, sunset-based entries use STATIC timer unit files (always
+    ``OnCalendar=*-*-* 03:00:00``) whose content never changes after first install.
+    The actual sunset fire time is computed at runtime inside ``sonos_play.py``
+    via ``--sleep-until-schedule``.  Because the timer files are static, the daily
+    02:00 reschedule run finds ``_unit_file_content_matches() == True`` for all
+    sunset entries and skips the write entirely — meaning ``daemon-reload`` is also
+    skipped, eliminating the race condition documented in the 2026-04-29 incident.
 
     Fixed-time timers are restarted only when their unit file changed AND their
     ``OnCalendar`` fire time has not yet elapsed today.  When the fire time has
     already passed, ``daemon-reload`` alone re-arms the active timer for tomorrow
     without triggering a spurious immediate play.
+
     ``flag-reschedule.timer`` is never restarted (to avoid the self-referential
     restart that triggers a catch-up fire at 02:00).
 
     When one or more schedule timers are *not* yet enabled, this is a first-install
-    run; use ``enable --now`` for all timers including ``flag-reschedule.timer``.
+    run; use ``enable --now`` for all timers including ``flag-reschedule.timer``,
+    and immediately start each sunset service (non-blocking) so today's plays happen.
 
     Args:
         schedule_names (list[str]): Sanitised schedule names to check.
@@ -778,8 +869,9 @@ def main():
     if is_reschedule:
         _log.info(
             "Run reason: reschedule — all %d schedule timer(s) already enabled; "
-            "will write updated unit files and daemon-reload (already-active sunset "
-            "timer re-armed by daemon-reload), skip flag-reschedule.timer restart",
+            "sunset timers use static 03:00 OnCalendar (no rewrite, no daemon-reload race); "
+            "fixed-time timer files checked for changes; "
+            "skip flag-reschedule.timer restart",
             len(processed_names),
         )
     else:
@@ -887,8 +979,20 @@ def main():
         service_path = os.path.join(SYSTEMD_DIR, f"flag-{name}.service")
         timer_path = os.path.join(SYSTEMD_DIR, f"flag-{name}.timer")
 
-        service_content = _build_service_unit(name, audio_url)
-        timer_content = _build_timer_unit(name, hour, minute)
+        if is_sunset_based:
+            # Sunset-based entries use static unit files that never change:
+            # - The service uses --sleep-until-schedule so the sunset time is
+            #   computed at runtime (reading config.json) rather than being baked
+            #   into the OnCalendar= value.
+            # - The timer fires at a fixed 03:00 every morning.
+            # Because neither file ever needs updating, the daily 02:00
+            # reschedule run will find _unit_file_content_matches() == True and
+            # skip the write entirely — no daemon-reload, no race condition.
+            service_content = _build_sunset_service_unit(name, audio_url)
+            timer_content = _build_sunset_timer_unit(name)
+        else:
+            service_content = _build_service_unit(name, audio_url)
+            timer_content = _build_timer_unit(name, hour, minute)
 
         # Only write unit files when content has actually changed to avoid
         # unnecessary daemon-reload cycles.
@@ -935,7 +1039,9 @@ def main():
     )
 
     # --- Write the boot-time reschedule service ---
-    boot_reschedule_svc_content = _build_boot_reschedule_service(sorted(written_names))
+    boot_reschedule_svc_content = _build_boot_reschedule_service(
+        sorted(written_names), sorted(sunset_names)
+    )
     boot_reschedule_svc_path = os.path.join(SYSTEMD_DIR, "flag-boot-reschedule.service")
     if not _unit_file_content_matches(boot_reschedule_svc_path, boot_reschedule_svc_content):
         _write_unit_file(boot_reschedule_svc_path, boot_reschedule_svc_content)
@@ -970,36 +1076,33 @@ def main():
         # avoids an unnecessary timer reset — if the stamp is still valid there
         # is no reason to reset it with a restart.
         #
-        # Sunset timers are left active across the unit-file rewrite.  systemd
-        # re-reads the updated unit file on daemon-reload and re-arms an
-        # *active* timer with the new OnCalendar value automatically — no
-        # stop/start is required or safe to use.
-        #
-        # The previous PR #43 approach (stop→write→reload→start) caused the
-        # timer to fire immediately after "systemctl start", even with
-        # Persistent=false, because systemd's internal next-elapse calculation
-        # can treat today's OnCalendar event as missed immediately after a
-        # stop+reload cycle.  Leaving the timer active and relying on
-        # daemon-reload re-arming is the correct fix.
+        # Sunset timers now use STATIC unit files: the timer fires at 03:00 every
+        # day (OnCalendar=*-*-* 03:00:00) and the service computes the actual
+        # sunset time at runtime via --sleep-until-schedule.  The timer and
+        # service files never change after first install, so _unit_file_content_matches
+        # always returns True and no daemon-reload is triggered.  This eliminates
+        # the race condition where daemon-reload of an already-active timer with a
+        # mutated OnCalendar value caused systemd to fire the service immediately.
         for name in sorted(written_names):
             timer_name = f"flag-{name}.timer"
             if name in sunset_names:
-                # Sunset timer: already-active timer re-armed by daemon-reload.
-                # Do NOT stop/start — that would cause spurious immediate fire.
-                sun_hour, sun_minute = all_times[name]
+                # Sunset timer: static 03:00 timer + sleep-until-schedule service.
+                # These files never change (runtime sunset computation in service).
+                # No stop/start/restart needed — just report status.
                 if name in changed_units:
+                    # First-time write of this sunset timer (e.g., new schedule entry).
                     _log.info(
-                        "  ✅ %s: unit updated (OnCalendar=%02d:%02d); "
-                        "already-active timer re-armed by daemon-reload",
-                        timer_name, sun_hour, sun_minute,
+                        "  ✅ %s: written (static OnCalendar=03:00; "
+                        "actual sunset time computed at runtime)",
+                        timer_name,
                     )
                     print(
-                        f"  ✅ {timer_name}: unit updated (OnCalendar={sun_hour:02d}:{sun_minute:02d}); "
-                        f"already-active timer re-armed by daemon-reload"
+                        f"  ✅ {timer_name}: written (static 03:00 timer; "
+                        f"sunset time computed at runtime by service)"
                     )
                 else:
-                    _log.info("  %s: unchanged, no action needed", timer_name)
-                    print(f"  ✅ {timer_name}: unchanged, no action needed")
+                    _log.info("  %s: static 03:00 timer unchanged", timer_name)
+                    print(f"  ✅ {timer_name}: static 03:00 timer unchanged")
             else:
                 # Fixed-time timer: only restart if the unit file changed AND
                 # the fire time has not yet elapsed today.  Restarting a timer
@@ -1064,6 +1167,21 @@ def main():
             except RuntimeError as exc:
                 print(f"  ⚠️  Could not activate {timer}: {exc}")
                 _log.error("Could not enable %s: %s", timer, exc)
+
+        # For sunset entries, the 03:00 timer won't fire until tomorrow; start
+        # each sunset service immediately (non-blocking) so today's plays still
+        # happen.  The service computes the remaining sleep time itself and exits
+        # cleanly if the sunset has already passed.
+        for name in sorted(sunset_names):
+            svc_name = f"flag-{name}.service"
+            _log.info("Starting %s immediately for today (first install)", svc_name)
+            try:
+                _run_systemctl("start", "--no-block", svc_name)
+                print(f"  ✅ Started for today: {svc_name}")
+                _log.info("Started %s (no-block) successfully", svc_name)
+            except RuntimeError as exc:
+                print(f"  ⚠️  Could not start {svc_name}: {exc}")
+                _log.warning("Could not start %s: %s", svc_name, exc)
 
         # Enable (but do not start) the boot-reschedule service — it is a
         # oneshot that runs on the next boot, not right now.

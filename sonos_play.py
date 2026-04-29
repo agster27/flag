@@ -9,6 +9,29 @@ transport state, and volume). All events are logged to LOG_FILE.
 When only one speaker is configured, the same 7-phase flow applies — the
 group formation steps (join/unjoin) are simply no-ops because there are no
 other speakers to coordinate with.
+
+Play guard
+----------
+Before any speaker discovery or playback, a time-of-day guard verifies that the
+current local time is within ``play_guard_tolerance_minutes`` (default: 2) of at
+least one scheduled fire time from ``config.json``.  If the check fails, the
+script logs a clear ERROR and exits non-zero without touching any speaker.
+
+This guard prevents spurious 2 AM plays caused by systemd daemon-reload races
+(see schedule_sonos.py for the full explanation).  The guard is bypassed by:
+
+* ``--ignore-guard`` CLI flag — for manual tests and the sunset sleep-wrapper path
+* ``play_guard_enabled: false`` in config.json — permanent per-install override
+* ``allow_quiet_hours_play: true`` in config.json — legacy bypass key
+
+Sunset sleep-wrapper
+--------------------
+When ``--sleep-until-schedule SCHEDULE_NAME`` is passed, the script reads the
+schedule's ``time`` field from ``config.json``, computes today's actual fire time
+(handling ``sunset`` / ``sunset±Nmin``), sleeps until that time, and then proceeds
+with normal playback.  This flag is used by the static 03:00 sunset timer service
+units so that the timer ``OnCalendar`` value never changes, eliminating the
+daemon-reload race entirely.
 """
 
 # =============================================================================
@@ -56,6 +79,7 @@ other speakers to coordinate with.
 #   [ ] Each speaker's original volume is restored after playback.
 # =============================================================================
 import argparse
+import fcntl
 import logging
 import os
 import shutil
@@ -78,6 +102,9 @@ except ImportError:
 
 _log = logging.getLogger(__name__)
 
+# Path to the shared advisory lock file used to prevent concurrent plays.
+_PLAY_LOCK_FILE = "/run/flag.lock"
+
 
 def log(message):
     """
@@ -89,6 +116,220 @@ def log(message):
         message (str): The message to log.
     """
     _log.info(message)
+
+
+def check_play_guard(config, now=None):
+    """
+    Return True if playback is permitted at the current local time.
+
+    Reads the ``schedules`` list from *config*, computes today's local fire time
+    for every entry (including sunset-based ones), and returns ``True`` if *now*
+    falls within ``±play_guard_tolerance_minutes`` of at least one fire time.
+
+    Returns ``True`` immediately (bypassing all checks) when:
+
+    * ``play_guard_enabled`` is ``False`` in config  (explicit opt-out)
+    * ``allow_quiet_hours_play`` is ``True`` in config  (legacy bypass)
+
+    Args:
+        config (dict): Parsed configuration dictionary from config.json.
+        now (datetime | None): The local time to test against.  A naive datetime
+            is assumed to be in the configured timezone.  Defaults to
+            ``datetime.now()`` in the configured timezone.
+
+    Returns:
+        bool: ``True`` if playback is permitted, ``False`` if the time-of-day
+        check fails (likely a systemd misfire).
+    """
+    # Respect explicit opt-out keys.
+    if not config.get("play_guard_enabled", True):
+        return True
+    if config.get("allow_quiet_hours_play", False):
+        return True
+
+    tolerance_mins = int(config.get("play_guard_tolerance_minutes", 2))
+    tz_name = config.get("timezone", "UTC")
+
+    # Attempt timezone-aware comparison; fall back to naive local time.
+    try:
+        import pytz as _pytz
+        tz_obj = _pytz.timezone(tz_name)
+        if now is None:
+            now_aware = datetime.now(tz_obj)
+        elif getattr(now, "tzinfo", None) is None:
+            now_aware = tz_obj.localize(now)
+        else:
+            now_aware = now
+    except Exception:
+        # pytz unavailable or invalid timezone — fall back to naive datetime.
+        now_aware = now if now is not None else datetime.now()
+
+    schedules = config.get("schedules") or []
+    if not schedules:
+        # No schedules → cannot determine expected fire time → allow.
+        return True
+
+    # Lazy import of sunset helpers to avoid a hard dependency at module load.
+    try:
+        from schedule_sonos import (
+            parse_sunset_offset,
+            get_sunset_local_time,
+            get_sunset_local_time_with_offset,
+        )
+        _sunset_helpers_available = True
+    except ImportError:
+        _sunset_helpers_available = False
+
+    tolerance_secs = tolerance_mins * 60
+
+    for entry in schedules:
+        time_str = entry.get("time", "")
+        if not isinstance(time_str, str) or not time_str.strip():
+            continue
+        time_str_norm = time_str.strip().lower()
+
+        try:
+            if _sunset_helpers_available:
+                offset = parse_sunset_offset(time_str_norm)
+            else:
+                offset = None
+
+            if time_str_norm == "sunset":
+                if not _sunset_helpers_available:
+                    continue
+                hour, minute = get_sunset_local_time(config)
+            elif offset is not None:
+                if not _sunset_helpers_available:
+                    continue
+                hour, minute = get_sunset_local_time_with_offset(config, offset)
+            else:
+                parts = time_str_norm.split(":")
+                if len(parts) != 2:
+                    continue
+                hour, minute = int(parts[0]), int(parts[1])
+                if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                    continue
+        except Exception:
+            continue
+
+        try:
+            fire_dt = now_aware.replace(hour=hour, minute=minute,
+                                        second=0, microsecond=0)
+            delta_secs = abs((now_aware - fire_dt).total_seconds())
+            if delta_secs <= tolerance_secs:
+                return True
+        except Exception:
+            continue
+
+    return False
+
+
+def _sleep_until_schedule(config, schedule_name):
+    """
+    Compute today's fire time for *schedule_name* and sleep until it.
+
+    Called when ``--sleep-until-schedule`` is passed on the command line.  Used
+    by the static 03:00 sunset timer service units so the timer ``OnCalendar``
+    value never needs to change.
+
+    If the computed fire time has already passed today (e.g., the service was
+    started after a reboot past sunset), exits with code 0 immediately without
+    playing — missed plays are intentionally skipped.
+
+    After waking, acquires the shared advisory play lock (``/run/flag.lock``)
+    non-exclusively so that concurrent plays are still prevented (same semantics
+    as the ``flock -n`` wrapper used by fixed-time services).
+
+    Args:
+        config (dict): Parsed configuration from config.json.
+        schedule_name (str): Name of the schedule entry whose time to use.
+
+    Returns:
+        Never returns normally; either sleeps-then-returns-to-caller OR sys.exit.
+    """
+    # Locate the schedule entry.
+    schedules = config.get("schedules") or []
+    entry = next((s for s in schedules if s.get("name") == schedule_name), None)
+    if entry is None:
+        _log.error(
+            "--sleep-until-schedule: schedule '%s' not found in config.json; aborting.",
+            schedule_name,
+        )
+        sys.exit(1)
+
+    time_str = entry.get("time", "")
+    time_str_norm = (time_str.strip().lower() if isinstance(time_str, str)
+                     else "")
+
+    tz_name = config.get("timezone", "UTC")
+    try:
+        import pytz as _pytz
+        tz_obj = _pytz.timezone(tz_name)
+        now = datetime.now(tz_obj)
+    except Exception:
+        now = datetime.now()
+
+    try:
+        from schedule_sonos import (
+            parse_sunset_offset,
+            get_sunset_local_time,
+            get_sunset_local_time_with_offset,
+        )
+        offset = parse_sunset_offset(time_str_norm)
+        if time_str_norm == "sunset":
+            hour, minute = get_sunset_local_time(config)
+        elif offset is not None:
+            hour, minute = get_sunset_local_time_with_offset(config, offset)
+        else:
+            parts = time_str_norm.split(":")
+            if len(parts) != 2:
+                raise ValueError(f"Unexpected time format: {time_str!r}")
+            hour, minute = int(parts[0]), int(parts[1])
+    except Exception as exc:
+        _log.error(
+            "--sleep-until-schedule: cannot compute fire time for '%s': %s; aborting.",
+            schedule_name, exc,
+        )
+        sys.exit(1)
+
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    sleep_secs = (target - now).total_seconds()
+
+    if sleep_secs <= 0:
+        _log.info(
+            "sleep_until_schedule: fire time %02d:%02d for '%s' has already passed "
+            "today; skipping play.",
+            hour, minute, schedule_name,
+        )
+        sys.exit(0)
+
+    _log.info(
+        "sleep_until_schedule: sleeping %.0f s until %02d:%02d for schedule '%s'",
+        sleep_secs, hour, minute, schedule_name,
+    )
+    time.sleep(sleep_secs)
+    _log.info(
+        "sleep_until_schedule: woke up at %02d:%02d; proceeding with playback for '%s'",
+        hour, minute, schedule_name,
+    )
+
+    # Acquire the shared advisory lock (non-blocking) so that concurrent plays
+    # are prevented, matching the ``flock -n /run/flag.lock`` semantics used by
+    # fixed-time services.
+    try:
+        lock_fd = open(_PLAY_LOCK_FILE, "w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Keep lock_fd alive for the duration of the process (closed on exit).
+        # Assign to a module-level variable so it is not garbage-collected.
+        _sleep_until_schedule._lock_fd = lock_fd  # type: ignore[attr-defined]
+    except (OSError, IOError):
+        _log.error(
+            "sleep_until_schedule: another play is in progress; skipping '%s'.",
+            schedule_name,
+        )
+        sys.exit(0)
+
+    # Caller (main()) will proceed with the normal playback flow after we return.
 
 
 def get_mp3_duration(url, default_wait):
@@ -147,9 +388,50 @@ def main():
     """
     parser = argparse.ArgumentParser(description="Play an audio URL on Sonos speakers.")
     parser.add_argument("audio_url", help="URL of the MP3 file to play")
+    parser.add_argument(
+        "--ignore-guard",
+        action="store_true",
+        help="Skip the time-of-day play guard (for manual tests via setup.sh).",
+    )
+    parser.add_argument(
+        "--sleep-until-schedule",
+        metavar="SCHEDULE_NAME",
+        help=(
+            "Compute today's fire time for SCHEDULE_NAME from config.json and sleep "
+            "until that time before playing.  Used by static 03:00 sunset timer "
+            "service units to avoid daemon-reload races."
+        ),
+    )
     args = parser.parse_args()
 
     config = load_config()
+
+    # ------------------------------------------------------------------
+    # Sunset sleep-wrapper: sleep until the schedule's computed fire time,
+    # then fall through to normal playback (guard bypassed since timing is
+    # handled by the wrapper itself).
+    # ------------------------------------------------------------------
+    if args.sleep_until_schedule is not None:
+        _sleep_until_schedule(config, args.sleep_until_schedule)
+        # After _sleep_until_schedule returns we are at the correct time;
+        # proceed with playback without the guard.
+        args.ignore_guard = True
+
+    # ------------------------------------------------------------------
+    # Play guard: refuse to play if now is not near any scheduled fire time.
+    # This is the primary defense against spurious systemd misfires.
+    # ------------------------------------------------------------------
+    if not args.ignore_guard:
+        if not check_play_guard(config):
+            tolerance = config.get("play_guard_tolerance_minutes", 2)
+            _log.error(
+                "play_guard refused to play %s at %s — no scheduled fire time "
+                "within ±%d min.  This is likely a systemd misfire; aborting.",
+                args.audio_url,
+                datetime.now().strftime("%H:%M:%S"),
+                tolerance,
+            )
+            sys.exit(1)
 
     # --- Validate speakers list ---
     speakers_cfg = config.get("speakers")
