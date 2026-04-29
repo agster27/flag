@@ -19,10 +19,9 @@ readonly MENU_INSTALL=5
 readonly MENU_UPGRADE=6
 readonly MENU_RECONFIG=7
 readonly MENU_RELOAD=8
-readonly MENU_BACKEND=9
-readonly MENU_MANAGE=10
-readonly MENU_UNINSTALL=11
-readonly MENU_EXIT=12
+readonly MENU_MANAGE=9
+readonly MENU_UNINSTALL=10
+readonly MENU_EXIT=11
 
 # ---------------------------------------------------------------------------
 # Table of contents
@@ -1531,200 +1530,6 @@ PYEOF
 }
 
 # ---------------------------------------------------------------------------
-# Detect whether the current scheduling backend is systemd timers or cron.
-# Sets _SCHEDULING_BACKEND to "systemd", "cron", or "none".
-# ---------------------------------------------------------------------------
-function _detect_scheduling_backend() {
-    _SCHEDULING_BACKEND="none"
-    if [ -f /etc/cron.d/flag ]; then
-        _SCHEDULING_BACKEND="cron"
-    elif systemctl list-unit-files "flag-*.timer" 2>/dev/null | grep -q "flag-"; then
-        _SCHEDULING_BACKEND="systemd"
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# Switch the scheduling backend between systemd timers and cron.
-# ---------------------------------------------------------------------------
-function switch_scheduling_backend() {
-    echo ""
-    echo "============================================"
-    echo "  Switch Scheduling Backend"
-    echo "============================================"
-
-    _detect_scheduling_backend
-    echo ""
-    echo "  Current backend: $_SCHEDULING_BACKEND"
-    echo ""
-    echo "  ┌─ systemd timers (default) ─────────────────────────────────────────"
-    echo "  │  Precise, no extra processes. Requires daemon-reload when"
-    echo "  │  schedules change. Sunset timers use a static 03:00 timer"
-    echo "  │  + sleep-until-sunset wrapper to avoid misfire races."
-    echo "  │"
-    echo "  ├─ cron ─────────────────────────────────────────────────────────────"
-    echo "  │  Installs /etc/cron.d/flag. Sunset entries run every minute"
-    echo "  │  between 17:00–23:00; the play guard refuses every minute"
-    echo "  │  except the actual sunset minute (±tolerance). Simpler but"
-    echo "  │  uses a bit more CPU polling once per minute in the evening."
-    echo "  └────────────────────────────────────────────────────────────────────"
-    echo ""
-    echo "  1) Switch to systemd timers"
-    echo "  2) Switch to cron"
-    echo "  3) Cancel (no change)"
-    echo ""
-    read -rp "  Enter your choice [1-3]: " _BE_CHOICE
-
-    case "$_BE_CHOICE" in
-        1)
-            _backend_activate_systemd
-            ;;
-        2)
-            _backend_activate_cron
-            ;;
-        *)
-            echo "  No changes made."
-            ;;
-    esac
-    echo ""
-    read -rp "  Press Enter to return to menu..." _pause
-}
-
-# ---------------------------------------------------------------------------
-# Activate the systemd timers backend.
-# Removes /etc/cron.d/flag and re-runs schedule_sonos.py to install timers.
-# ---------------------------------------------------------------------------
-function _backend_activate_systemd() {
-    echo ""
-    echo "  Activating systemd timers backend..."
-
-    # Remove cron file if present
-    if [ -f /etc/cron.d/flag ]; then
-        maybe_sudo rm -f /etc/cron.d/flag
-        echo "  ✅ Removed /etc/cron.d/flag"
-    else
-        echo "  ℹ️  /etc/cron.d/flag not present (nothing to remove)"
-    fi
-
-    # Reinstall systemd units
-    if [ -d "$VENV_DIR" ]; then
-        echo "  🗓️  Installing systemd timer units..."
-        maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
-        echo "  ✅ Switched to systemd timers backend."
-    else
-        echo "  ⚠️  Python venv not found. Run Install (option ${MENU_INSTALL}) first."
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# Activate the cron backend.
-# Disables all flag-*.timer units and writes /etc/cron.d/flag.
-#
-# For fixed-time schedules: one cron entry fires at the configured HH:MM.
-# For sunset schedules:     one cron entry runs every minute 17:00-23:00.
-#   The play guard (±play_guard_tolerance_minutes) refuses every invocation
-#   except the actual sunset minute, so no extra sound is produced.
-# ---------------------------------------------------------------------------
-function _backend_activate_cron() {
-    echo ""
-
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo "  ⚠️  config.json not found. Please run Install first."
-        return
-    fi
-    if ! command -v jq &>/dev/null; then
-        echo "  ⚠️  'jq' not found. Cannot parse config.json."
-        return
-    fi
-    if [ ! -d "$VENV_DIR" ]; then
-        echo "  ⚠️  Python venv not found. Please run Install first."
-        return
-    fi
-
-    echo "  Activating cron backend..."
-
-    # Disable and stop all flag-*.timer units (keep flag-audio-http.service)
-    local _timer
-    for _timer in $(systemctl list-unit-files "flag-*.timer" --no-legend 2>/dev/null | awk '{print $1}'); do
-        maybe_sudo systemctl disable --now "$_timer" 2>/dev/null || true
-    done
-    echo "  ✅ Disabled all flag-*.timer units"
-
-    # Build /etc/cron.d/flag from config.json schedules
-    local _tz
-    _tz=$(jq -r '.timezone // "UTC"' "$CONFIG_FILE" 2>/dev/null || echo "UTC")
-    local _py="$VENV_DIR/bin/python"
-    local _play="$INSTALL_DIR/sonos_play.py"
-    local _schedule_count
-    _schedule_count=$(jq '.schedules | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
-
-    # Header
-    local _cron_content
-    _cron_content="# /etc/cron.d/flag — managed by setup.sh; do not edit by hand
-# Backend: cron (switched via setup.sh option ${MENU_BACKEND})
-# Timezone: $_tz
-SHELL=/bin/bash
-CRON_TZ=$_tz
-
-"
-
-    if [ "$_schedule_count" -eq 0 ]; then
-        echo "  ⚠️  No schedules in config.json; cron file will be empty."
-    fi
-
-    local _i _name _time _url _cron_line
-    for _i in $(seq 0 $((_schedule_count - 1))); do
-        _name=$(jq -r ".schedules[$_i].name // \"\"" "$CONFIG_FILE")
-        _time=$(jq -r ".schedules[$_i].time // \"\"" "$CONFIG_FILE")
-        _url=$(jq -r  ".schedules[$_i].audio_url // \"\"" "$CONFIG_FILE")
-
-        if [ -z "$_name" ] || [ -z "$_url" ]; then
-            continue
-        fi
-
-        # Normalise time string for comparison
-        _time_lower=$(echo "$_time" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
-
-        if [[ "$_time_lower" == "sunset" || "$_time_lower" == sunset* ]]; then
-            # Sunset entry: run every minute 17:00–23:00 local time.
-            # The play guard refuses all minutes except the actual sunset minute.
-            _cron_line="# ${_name}: sunset-based (guard allows only the actual sunset minute)"
-            _cron_content+="$_cron_line
-* 17-23 * * * root $_py $_play '$_url'
-"
-        else
-            # Fixed-time entry: parse HH:MM
-            _hour=$(echo "$_time_lower" | cut -d: -f1)
-            _min=$(echo  "$_time_lower" | cut -d: -f2)
-            # Strip leading zeros to avoid octal interpretation in cron
-            _hour=$(echo "$_hour" | sed 's/^0*//')
-            _min=$(echo  "$_min"  | sed 's/^0*//')
-            _hour=${_hour:-0}
-            _min=${_min:-0}
-            _cron_line="# ${_name}: fixed time ${_time}"
-            _cron_content+="$_cron_line
-${_min} ${_hour} * * * root $_py $_play '$_url'
-"
-        fi
-    done
-
-    # Write atomically
-    local _tmpf
-    _tmpf=$(mktemp)
-    printf '%s' "$_cron_content" > "$_tmpf"
-    maybe_sudo cp "$_tmpf" /etc/cron.d/flag
-    maybe_sudo chmod 644 /etc/cron.d/flag
-    rm -f "$_tmpf"
-
-    echo "  ✅ Written /etc/cron.d/flag"
-    echo ""
-    echo "  ℹ️  Sunset entries use a per-minute cron job (17:00–23:00)."
-    echo "     The play guard (±play_guard_tolerance_minutes from config.json)"
-    echo "     silently refuses every minute except the actual sunset minute."
-    echo ""
-    echo "  ✅ Switched to cron backend."
-}
-
-# ---------------------------------------------------------------------------
 # Renders the main interactive menu (header, status, config summary, sunset
 # line, and numbered option list).  Reads the user's choice into $CHOICE.
 # The caller is responsible for detecting install state before calling this.
@@ -1758,14 +1563,6 @@ function prompt_menu() {
         fi
     fi
 
-    # Show active scheduling backend
-    _detect_scheduling_backend
-    case "$_SCHEDULING_BACKEND" in
-        systemd) echo "  Backend: 🕒 systemd timers" ;;
-        cron)    echo "  Backend: ⏰ cron (/etc/cron.d/flag)" ;;
-        *)       echo "  Backend: (not installed)" ;;
-    esac
-
     get_sunset_header_line || true
     [ -n "$SUNSET_HEADER_LINE" ] && echo "$SUNSET_HEADER_LINE" || true
 
@@ -1785,7 +1582,6 @@ function prompt_menu() {
     local _upgrade_label="Upgrade (update scripts, keep config)"
     local _reconfig_label="Reconfigure (edit config.json interactively)"
     local _reload_label="Reload config (apply config.json changes)"
-    local _backend_label="Switch scheduling backend (systemd timers ↔ cron)"
     local _manage_label="Manage scheduled plays (add / edit / remove)"
 
     if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
@@ -1797,7 +1593,6 @@ function prompt_menu() {
         _upgrade_label="Upgrade (update scripts, keep config)  (requires install)"
         _reload_label="Reload config (apply config.json changes)  (requires install)"
         _manage_label="Manage scheduled plays (add / edit / remove)  (requires install)"
-        _backend_label="Switch scheduling backend  (requires install)"
     fi
 
     if [ "$INSTALL_STATE" = "none" ]; then
@@ -1816,15 +1611,14 @@ function prompt_menu() {
     echo "  6) $_upgrade_label"
     echo "  7) $_reconfig_label"
     echo "  8) $_reload_label"
-    echo "  9) $_backend_label"
-    echo "  10) $_manage_label"
+    echo "  9) $_manage_label"
     echo ""
     echo "  ── Danger zone ────────────────────────"
-    echo "  11) Uninstall completely"
+    echo "  10) Uninstall completely"
     echo ""
-    echo "  12) Exit without doing anything"
+    echo "  11) Exit without doing anything"
     echo ""
-    read -rp "Enter your choice [1-12]: " CHOICE
+    read -rp "Enter your choice [1-11]: " CHOICE
 }
 
 # ---------------------------------------------------------------------------
@@ -2525,10 +2319,6 @@ while true; do
             reload_config
             echo ""
             read -rp "  Press Enter to return to menu..." _pause
-            ;;
-        "$MENU_BACKEND")
-            _require_install || continue
-            switch_scheduling_backend
             ;;
         "$MENU_MANAGE")
             _require_install || continue
