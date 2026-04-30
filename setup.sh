@@ -21,8 +21,9 @@ readonly MENU_RECONFIG=7
 readonly MENU_RELOAD=8
 readonly MENU_MANAGE=9
 readonly MENU_PAUSE=10
-readonly MENU_UNINSTALL=11
-readonly MENU_EXIT=12
+readonly MENU_VOLUME=11
+readonly MENU_UNINSTALL=12
+readonly MENU_EXIT=13
 
 # ---------------------------------------------------------------------------
 # Table of contents
@@ -34,6 +35,7 @@ readonly MENU_EXIT=12
 #   Sunset:          show_sunset_time, get_sunset_header_line
 #   Status:          test_sonos_playback, list_scheduled_plays, view_logs
 #   Manage plays:    _msp_valid_time, _msp_pick_file, manage_scheduled_plays
+#   Manage volume:   manage_volume
 #   Install state:   detect_install_state, show_install_required_msg,
 #                    _require_install, _resolve_speaker_names
 #   Menu:            prompt_menu
@@ -1525,6 +1527,176 @@ function manage_scheduled_plays() {
     done
 }
 
+# ---------------------------------------------------------------------------
+# Quick-edit menu for global default volume and per-speaker volume overrides.
+# Writes only the .volume and .speakers keys back to config.json — no timer
+# regeneration, no service restart, since sonos_play.py reads volume at
+# playback time.
+# ---------------------------------------------------------------------------
+function manage_volume() {
+    echo ""
+    echo "============================================"
+    echo "  Manage Volume"
+    echo "============================================"
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "  ⚠️  config.json not found. Please run Install first."
+        return
+    fi
+    if ! command -v jq &>/dev/null; then
+        echo "  ⚠️  'jq' not found. Cannot manage volume."
+        return
+    fi
+
+    # Load current values into globals so the sub-menu can mutate them.
+    local _global_vol
+    _global_vol=$(jq -r '.volume // 30' "$CONFIG_FILE")
+
+    _mvips=(); _mvnames=(); _mvvols=(); _mvcount=0
+    local _spk_count
+    _spk_count=$(jq '.speakers | length // 0' "$CONFIG_FILE" 2>/dev/null || echo "0")
+    for (( _i=0; _i<_spk_count; _i++ )); do
+        _mvips[$_mvcount]=$(jq -r ".speakers[${_i}].ip // \"\"" "$CONFIG_FILE")
+        _mvnames[$_mvcount]=$(jq -r ".speakers[${_i}].name // \"\"" "$CONFIG_FILE")
+        # Empty string sentinel = no override (use global default).
+        _mvvols[$_mvcount]=$(jq -r "if .speakers[${_i}] | has(\"volume\") then (.speakers[${_i}].volume | tostring) else \"\" end" "$CONFIG_FILE")
+        _mvcount=$(( _mvcount + 1 ))
+    done
+
+    while true; do
+        echo ""
+        echo "  Current volume settings:"
+        echo "    Global default: $_global_vol"
+        if [ "$_mvcount" -eq 0 ]; then
+            echo "    (no speakers configured)"
+        else
+            for (( _j=0; _j<_mvcount; _j++ )); do
+                local _label
+                if [ -n "${_mvnames[$_j]}" ]; then
+                    _label="\"${_mvnames[$_j]}\" (${_mvips[$_j]})"
+                else
+                    _label="${_mvips[$_j]}"
+                fi
+                if [ -n "${_mvvols[$_j]}" ]; then
+                    printf "    %d. %s: %s  (override)\n" "$(( _j + 1 ))" "$_label" "${_mvvols[$_j]}"
+                else
+                    printf "    %d. %s: %s  (default)\n" "$(( _j + 1 ))" "$_label" "$_global_vol"
+                fi
+            done
+        fi
+
+        echo ""
+        echo "  ── Manage Volume ──────────────────────────────────────"
+        echo "  1) Edit global default volume"
+        echo "  2) Set/edit per-speaker volume override"
+        echo "  3) Clear per-speaker override (use global default)"
+        echo "  4) Save and apply changes"
+        echo "  5) Cancel without saving"
+        echo ""
+        read -rp "  Enter your choice [1-5]: " _vol_choice
+
+        case "$_vol_choice" in
+            1)
+                # ── Edit global default ──
+                while true; do
+                    read -rp "  New global default volume 0–100 [${_global_vol}]: " _new_vol
+                    _new_vol="${_new_vol:-$_global_vol}"
+                    if [[ "$_new_vol" =~ ^[0-9]+$ ]] && [ "$_new_vol" -ge 0 ] && [ "$_new_vol" -le 100 ]; then
+                        _global_vol="$_new_vol"
+                        echo "  ✅ Global default set to $_global_vol."
+                        break
+                    fi
+                    echo "  ⚠️  Please enter a number between 0 and 100."
+                done
+                ;;
+            2)
+                # ── Set/edit per-speaker override ──
+                if [ "$_mvcount" -eq 0 ]; then
+                    echo "  (no speakers to override)"
+                    continue
+                fi
+                read -rp "  Speaker number (1-${_mvcount}, 0 to cancel): " _spk_idx
+                if [ "$_spk_idx" = "0" ] || [ -z "$_spk_idx" ]; then
+                    echo "  Cancelled."
+                    continue
+                fi
+                if ! [[ "$_spk_idx" =~ ^[0-9]+$ ]] || [ "$_spk_idx" -lt 1 ] || [ "$_spk_idx" -gt "$_mvcount" ]; then
+                    echo "  ⚠️  Invalid selection."
+                    continue
+                fi
+                local _si=$(( _spk_idx - 1 ))
+                local _cur="${_mvvols[$_si]:-$_global_vol}"
+                while true; do
+                    read -rp "  Volume override 0–100 [${_cur}]: " _new
+                    _new="${_new:-$_cur}"
+                    if [[ "$_new" =~ ^[0-9]+$ ]] && [ "$_new" -ge 0 ] && [ "$_new" -le 100 ]; then
+                        _mvvols[$_si]="$_new"
+                        echo "  ✅ Override set to $_new."
+                        break
+                    fi
+                    echo "  ⚠️  Please enter a number between 0 and 100."
+                done
+                ;;
+            3)
+                # ── Clear per-speaker override ──
+                if [ "$_mvcount" -eq 0 ]; then
+                    echo "  (no speakers to clear)"
+                    continue
+                fi
+                read -rp "  Speaker number to clear (1-${_mvcount}, 0 to cancel): " _spk_idx
+                if [ "$_spk_idx" = "0" ] || [ -z "$_spk_idx" ]; then
+                    echo "  Cancelled."
+                    continue
+                fi
+                if ! [[ "$_spk_idx" =~ ^[0-9]+$ ]] || [ "$_spk_idx" -lt 1 ] || [ "$_spk_idx" -gt "$_mvcount" ]; then
+                    echo "  ⚠️  Invalid selection."
+                    continue
+                fi
+                local _si=$(( _spk_idx - 1 ))
+                _mvvols[$_si]=""
+                echo "  ✅ Override cleared (will use global default)."
+                ;;
+            4)
+                # ── Save and apply ──
+                # Walk the existing speakers array by index to preserve every
+                # field (name, ip, anything else) and only touch .volume.
+                local _new_speakers="[]"
+                for (( _i=0; _i<_mvcount; _i++ )); do
+                    local _existing
+                    _existing=$(jq ".speakers[${_i}]" "$CONFIG_FILE")
+                    if [ -n "${_mvvols[$_i]}" ]; then
+                        _new_speakers=$(echo "$_new_speakers" | jq \
+                            --argjson obj "$_existing" \
+                            --argjson vol "${_mvvols[$_i]}" \
+                            '. + [$obj + {volume: $vol}]')
+                    else
+                        _new_speakers=$(echo "$_new_speakers" | jq \
+                            --argjson obj "$_existing" \
+                            '. + [$obj | del(.volume)]')
+                    fi
+                done
+                jq --argjson vol "$_global_vol" --argjson speakers "$_new_speakers" \
+                    '.volume = $vol | .speakers = $speakers' \
+                    "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" \
+                    && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+                log "✅ Volume settings saved to config.json."
+                echo "  ℹ️  Changes take effect at the next scheduled or test playback."
+                echo ""
+                read -rp "  Press Enter to return to menu..." _pause
+                return
+                ;;
+            5|"")
+                # ── Cancel ──
+                echo "  ↩️  Changes discarded."
+                return
+                ;;
+            *)
+                echo "  ⚠️  Invalid choice. Enter 1–5."
+                ;;
+        esac
+    done
+}
+
 function view_logs() {
     # Shows the last 20 lines of both setup.log and sonos_play.log side by side,
     # each prefixed with a section heading so recent activity is easy to scan.
@@ -1771,6 +1943,7 @@ function prompt_menu() {
     if [ "$_PAUSE_FLAG" = "true" ]; then
         _pause_label="Resume scheduled plays"
     fi
+    local _volume_label="Manage volume (global default + per-speaker overrides)"
 
     if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
         _install_label="Install (first-time setup)  ← start here"
@@ -1786,6 +1959,7 @@ function prompt_menu() {
 
     if [ "$INSTALL_STATE" = "none" ]; then
         _reconfig_label="Reconfigure (edit config.json interactively)  (requires install)"
+        _volume_label="Manage volume (global default + per-speaker overrides)  (requires install)"
     fi
 
     echo ""
@@ -1802,13 +1976,14 @@ function prompt_menu() {
     echo "  8) $_reload_label"
     echo "  9) $_manage_label"
     echo "  10) $_pause_label"
+    echo "  11) $_volume_label"
     echo ""
     echo "  ── Danger zone ────────────────────────"
-    echo "  11) Uninstall completely"
+    echo "  12) Uninstall completely"
     echo ""
-    echo "  12) Exit without doing anything"
+    echo "  13) Exit without doing anything"
     echo ""
-    read -rp "Enter your choice [1-12]: " CHOICE
+    read -rp "Enter your choice [1-13]: " CHOICE
 }
 
 # ---------------------------------------------------------------------------
@@ -2517,6 +2692,13 @@ while true; do
         "$MENU_PAUSE")
             _require_install || continue
             pause_resume_plays
+            ;;
+        "$MENU_VOLUME")
+            if [ "$INSTALL_STATE" = "none" ]; then
+                show_install_required_msg
+            else
+                manage_volume
+            fi
             ;;
         "$MENU_UNINSTALL")
             uninstall_all
