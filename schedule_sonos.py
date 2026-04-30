@@ -35,6 +35,7 @@ unit so that ``sonos_play.py`` receives it at runtime.
 """
 
 import glob as _glob
+import json
 import logging
 import os
 import re
@@ -42,13 +43,13 @@ import shlex
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 from astral import LocationInfo
 from astral.sun import sun
 import pytz
 
-from config import load_config, INSTALL_DIR, LOG_FILE  # noqa: F401 (LOG_FILE triggers basicConfig)
+from config import CONFIG_PATH, load_config, INSTALL_DIR, LOG_FILE  # noqa: F401 (LOG_FILE triggers basicConfig)
 
 _log = logging.getLogger("schedule_sonos")
 
@@ -753,6 +754,151 @@ def _clean_stale_units(current_names):
 
 
 # ---------------------------------------------------------------------------
+# Pause / vacation-mode helpers
+# ---------------------------------------------------------------------------
+
+def _clear_pause_in_config(config_path: str) -> bool:
+    """
+    Clear ``paused`` / ``paused_until`` in config.json for auto-resume.
+
+    Used by :func:`_resolve_pause_state` when the configured ``paused_until``
+    date has elapsed (the morning after the last paused day).  Performs an
+    atomic rewrite that preserves all other config keys and the file's
+    original ownership/permissions so the user account that originally wrote
+    config.json can still rewrite it from setup.sh.
+
+    Args:
+        config_path (str): Absolute path to config.json.
+
+    Returns:
+        bool: ``True`` if the file was rewritten, ``False`` on any failure
+        (the caller logs and proceeds — auto-resume is best-effort).
+    """
+    try:
+        with open(config_path) as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        _log.warning("Auto-resume: could not read %s: %s", config_path, exc)
+        return False
+    cfg["paused"] = False
+    cfg["paused_until"] = ""
+    try:
+        st = os.stat(config_path)
+        dir_path = os.path.dirname(config_path) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(cfg, f, indent=2)
+                f.write("\n")
+            os.chmod(tmp_path, st.st_mode & 0o7777)
+            if hasattr(os, "chown"):
+                try:
+                    os.chown(tmp_path, st.st_uid, st.st_gid)
+                except (OSError, PermissionError):
+                    # Non-root or unsupported FS — keep going; mv-replace still works
+                    pass
+            os.replace(tmp_path, config_path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except OSError as exc:
+        _log.warning("Auto-resume: could not rewrite %s: %s", config_path, exc)
+        return False
+    return True
+
+
+def _resolve_pause_state(config: dict):
+    """
+    Resolve config-level pause state, applying auto-resume when due.
+
+    A pause expires the morning after ``paused_until``.  When this script runs
+    on or after ``paused_until + 1 day``, ``paused`` and ``paused_until`` are
+    cleared in config.json (in place) and the live *config* dict is updated so
+    the rest of ``main()`` proceeds as if the pause had never been set.
+
+    Args:
+        config (dict): Mutable configuration dictionary loaded by
+            :func:`config.load_config`.  Cleared in place on auto-resume.
+
+    Returns:
+        tuple[bool, str]: ``(is_paused, status_msg)``.  ``status_msg`` is a
+        short human-readable description used for log/print output.  When
+        ``is_paused`` is False, ``status_msg`` may still contain a one-line
+        note about an auto-resume that just occurred.
+    """
+    paused = bool(config.get("paused", False))
+    until_raw = (config.get("paused_until") or "").strip()
+    if not paused:
+        return False, ""
+
+    if until_raw:
+        try:
+            until_date = datetime.strptime(until_raw, "%Y-%m-%d").date()
+        except ValueError:
+            _log.warning(
+                "Invalid paused_until %r in config.json — treating as indefinite pause",
+                until_raw,
+            )
+            return True, "Paused indefinitely (paused_until unparseable)"
+        today = date.today()
+        if today > until_date:
+            # paused_until has elapsed — auto-resume.
+            if _clear_pause_in_config(CONFIG_PATH):
+                config["paused"] = False
+                config["paused_until"] = ""
+                msg = (
+                    f"Auto-resumed: paused_until {until_raw} elapsed "
+                    f"(today is {today.isoformat()})"
+                )
+                _log.info(msg)
+                print(f"  ▶️  {msg}")
+                return False, msg
+            # Could not rewrite config.json — keep treating as paused so we
+            # don't accidentally re-enable timers when the user has not been
+            # informed.  Next reschedule run will retry.
+            return True, (
+                f"Paused (auto-resume due {until_raw}, but config.json rewrite failed)"
+            )
+        resume_on = (until_date + timedelta(days=1)).isoformat()
+        return True, f"Paused (resumes {resume_on})"
+    return True, "Paused indefinitely"
+
+
+def _disable_active_schedule_timers():
+    """
+    Disable + stop any currently-enabled ``flag-{name}.timer`` schedule units.
+
+    Called when entering pause mode so timers that were previously enabled by
+    a first-install run don't continue firing.  Reserved units
+    (``flag-audio-http``, ``flag-reschedule``, ``flag-boot-reschedule``) are
+    intentionally left alone — the daily reschedule timer must keep running so
+    we can re-evaluate ``paused_until`` and auto-resume.
+
+    Returns:
+        list[str]: Names of timer units that were actually disabled (used for
+        log/print output).
+    """
+    disabled = []
+    for unit_path in _glob.glob(os.path.join(SYSTEMD_DIR, "flag-*.timer")):
+        unit = os.path.basename(unit_path)
+        inner = unit[len("flag-"):-len(".timer")]
+        if inner in _RESERVED_NAMES:
+            continue
+        if not _is_timer_enabled(unit):
+            continue
+        try:
+            _run_systemctl("disable", "--now", unit)
+            disabled.append(unit)
+            _log.info("Pause: disabled %s", unit)
+        except RuntimeError as exc:
+            _log.warning("Pause: could not disable %s: %s", unit, exc)
+    return disabled
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -822,6 +968,14 @@ def main():
     tz_name = config["timezone"]
 
     _log.info("schedule_sonos.py started (timezone=%s)", tz_name)
+
+    # Resolve pause state up front.  If paused_until has elapsed, this clears
+    # the flag in config.json (auto-resume) and returns is_paused=False so the
+    # rest of main() activates timers normally.
+    is_paused, pause_msg = _resolve_pause_state(config)
+    if is_paused:
+        _log.info("Pause mode: %s", pause_msg)
+        print(f"  ⏸️  {pause_msg}")
 
     schedules = resolve_schedules(config)
     if not schedules:
@@ -1070,6 +1224,46 @@ def main():
         _log.info("Skipping daemon-reload: no unit files changed and no stale units removed")
 
     # --- Activate timers ---
+    if is_paused:
+        # Vacation mode: unit files are written/refreshed normally so a future
+        # resume just needs to enable --now them, but no schedule timer is
+        # allowed to fire while paused.  The reschedule timer (and the boot
+        # reschedule service) stay enabled so the daily 02:00 run can detect
+        # paused_until elapsing and auto-resume.
+        disabled = _disable_active_schedule_timers()
+        if disabled:
+            for unit in disabled:
+                print(f"  ⏸️  Disabled (paused): {unit}")
+        else:
+            print("  ⏸️  No active schedule timers to disable.")
+        # Make sure the reschedule timer itself is enabled so the next 02:00
+        # run can re-evaluate paused_until.
+        if not _is_timer_enabled("flag-reschedule.timer"):
+            try:
+                _run_systemctl("enable", "--now", "flag-reschedule.timer")
+                print("  ✅ Enabled (for daily resume check): flag-reschedule.timer")
+            except RuntimeError as exc:
+                print(f"  ⚠️  Could not enable flag-reschedule.timer: {exc}")
+                _log.error("Could not enable flag-reschedule.timer: %s", exc)
+        # Same for the boot-reschedule oneshot — without it, a reboot during
+        # a multi-week pause would leave the resume check unarmed until the
+        # next 02:00.
+        try:
+            _run_systemctl("enable", "flag-boot-reschedule.service")
+        except RuntimeError as exc:
+            _log.warning(
+                "Could not enable flag-boot-reschedule.service while paused: %s", exc
+            )
+
+        print("")
+        print(f"  ⏸️  Paused — no scheduled plays will fire. {pause_msg}")
+        print("  To resume: ./setup.sh → option 10) Resume scheduled plays")
+        print("")
+        print("To verify (timers should be inactive):")
+        print("  systemctl list-timers --all | grep flag")
+        _log.info("schedule_sonos.py completed (paused mode)")
+        return
+
     if is_reschedule:
         # Reschedule run: restart fixed-time timers only when their unit file
         # actually changed.  Skipping the restart when content is unchanged
