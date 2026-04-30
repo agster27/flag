@@ -20,9 +20,10 @@ readonly MENU_UPGRADE=6
 readonly MENU_RECONFIG=7
 readonly MENU_RELOAD=8
 readonly MENU_MANAGE=9
-readonly MENU_VOLUME=10
-readonly MENU_UNINSTALL=11
-readonly MENU_EXIT=12
+readonly MENU_PAUSE=10
+readonly MENU_VOLUME=11
+readonly MENU_UNINSTALL=12
+readonly MENU_EXIT=13
 
 # ---------------------------------------------------------------------------
 # Table of contents
@@ -718,6 +719,12 @@ function configure_setup() {
             '. + [{"name": $name, "audio_url": $url, "time": $time}]')
     done
 
+    # Preserve any existing pause state across reconfigure so a vacation pause
+    # is not silently lost when the user re-runs option 7.
+    PAUSED_PRESERVED=$(cfg_default "paused" "false")
+    [[ "$PAUSED_PRESERVED" != "true" && "$PAUSED_PRESERVED" != "false" ]] && PAUSED_PRESERVED="false"
+    PAUSED_UNTIL_PRESERVED=$(cfg_default "paused_until" "")
+
     # Write the complete config.json using jq for correct JSON encoding
     echo ""
     echo "  Writing config to $CONFIG_FILE ..."
@@ -725,13 +732,15 @@ function configure_setup() {
         --argjson  speakers        "$SPEAKERS_JSON" \
         --argjson  port            "$PORT" \
         --argjson  volume          "$VOLUME" \
-        --argjson  wait            "$WAIT_SECS" \
+        --argjson  wait             "$WAIT_SECS" \
         --argjson  skip_restore    "$SKIP_RESTORE" \
         --argjson  lat             "$LATITUDE" \
         --argjson  lon             "$LONGITUDE" \
         --arg      tz              "$TIMEZONE" \
         --argjson  offset          "$SUNSET_OFFSET" \
         --argjson  schedules       "$SCHEDULES_JSON" \
+        --argjson  paused          "$PAUSED_PRESERVED" \
+        --arg      paused_until    "$PAUSED_UNTIL_PRESERVED" \
         '{
           "speakers":              $speakers,
           "port":                  $port,
@@ -742,7 +751,9 @@ function configure_setup() {
           "longitude":             $lon,
           "timezone":              $tz,
           "sunset_offset_minutes": $offset,
-          "schedules":             $schedules
+          "schedules":             $schedules,
+          "paused":                $paused,
+          "paused_until":          $paused_until
         }' > "$CONFIG_FILE"
     log "✅ config.json written."
 }
@@ -1107,6 +1118,176 @@ function _msp_pick_file() {
     done
     echo "  ⚠️  '$_finput' not found in $AUDIO_DIR."
     return 1
+}
+
+# ---------------------------------------------------------------------------
+# Read pause state from config.json and populate three globals:
+#   _PAUSE_FLAG:       "true" / "false" / "" (empty when config.json missing)
+#   _PAUSE_UNTIL:      "" or "YYYY-MM-DD"
+#   _PAUSE_DESC:       human-readable description used by the menu header and
+#                      the pause/resume sub-menu (empty when not paused)
+# Auto-resume detection (paused_until elapsed) is NOT done here — that is the
+# job of schedule_sonos.py during the daily reschedule run.  This helper only
+# reflects what is currently written in config.json.
+# ---------------------------------------------------------------------------
+function _pause_status() {
+    _PAUSE_FLAG=""
+    _PAUSE_UNTIL=""
+    _PAUSE_DESC=""
+    if [ ! -f "$CONFIG_FILE" ] || ! command -v jq &>/dev/null; then
+        return
+    fi
+    _PAUSE_FLAG=$(jq -r '.paused // false' "$CONFIG_FILE" 2>/dev/null || echo "false")
+    _PAUSE_UNTIL=$(jq -r '.paused_until // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+    if [ "$_PAUSE_FLAG" = "true" ]; then
+        if [[ "$_PAUSE_UNTIL" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            # Resume the day after paused_until (inclusive end-of-vacation day)
+            local _resume_date
+            _resume_date=$(date -d "$_PAUSE_UNTIL +1 day" +%Y-%m-%d 2>/dev/null || echo "")
+            if [ -n "$_resume_date" ]; then
+                _PAUSE_DESC="⏸️  Paused (resumes ${_resume_date})"
+            else
+                _PAUSE_DESC="⏸️  Paused (until ${_PAUSE_UNTIL})"
+            fi
+        else
+            _PAUSE_DESC="⏸️  Paused indefinitely"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Interactive screen for option ${MENU_PAUSE}.  When not paused, prompts for a
+# resume date (or indefinite) and sets paused=true in config.json.  When
+# already paused, offers to resume immediately.  After the config.json edit,
+# re-runs schedule_sonos.py so the systemd timers are disabled (pause) or
+# re-enabled (resume) right away.
+# ---------------------------------------------------------------------------
+function pause_resume_plays() {
+    echo ""
+    echo "============================================"
+    echo "  Pause / Resume Scheduled Plays"
+    echo "============================================"
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "  ⚠️  config.json not found. Please run Install (option ${MENU_INSTALL}) first."
+        echo ""
+        read -rp "  Press Enter to return to menu..." _pause
+        return
+    fi
+    if ! command -v jq &>/dev/null; then
+        echo "  ⚠️  'jq' not found. Cannot edit config.json."
+        echo ""
+        read -rp "  Press Enter to return to menu..." _pause
+        return
+    fi
+
+    _pause_status
+
+    local _new_paused=""
+    local _new_until=""
+
+    if [ "$_PAUSE_FLAG" = "true" ]; then
+        echo "  Current state: $_PAUSE_DESC"
+        echo ""
+        read -rp "  Resume scheduled plays now? [Y/n]: " _pr_resume
+        if [[ "${_pr_resume,,}" == "n" ]]; then
+            echo "  No change."
+            echo ""
+            read -rp "  Press Enter to return to menu..." _pause
+            return
+        fi
+        _new_paused="false"
+        _new_until=""
+    else
+        echo "  Scheduled plays are currently active."
+        echo ""
+        echo "  How long should they be paused?"
+        echo "    1) Until a specific date (e.g. last day of vacation)"
+        echo "    2) Indefinitely (resume manually later)"
+        echo "    3) Cancel"
+        echo ""
+        read -rp "  Enter your choice [1-3]: " _pr_choice
+        case "$_pr_choice" in
+            1)
+                local _today
+                _today=$(date +%Y-%m-%d)
+                while true; do
+                    read -rp "  Last paused day (YYYY-MM-DD, e.g. last day of vacation): " _pr_date
+                    if [[ ! "$_pr_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+                        echo "  ⚠️  Invalid format. Use YYYY-MM-DD."
+                        continue
+                    fi
+                    # Validate it parses as a real date and is not in the past
+                    if ! date -d "$_pr_date" +%Y-%m-%d &>/dev/null; then
+                        echo "  ⚠️  '$_pr_date' is not a valid calendar date."
+                        continue
+                    fi
+                    if [[ "$_pr_date" < "$_today" ]]; then
+                        echo "  ⚠️  '$_pr_date' is in the past. Pick today or a future date."
+                        continue
+                    fi
+                    break
+                done
+                local _resume_on
+                _resume_on=$(date -d "$_pr_date +1 day" +%Y-%m-%d 2>/dev/null || echo "$_pr_date")
+                echo ""
+                echo "  Plays will be silenced through ${_pr_date} and resume on ${_resume_on}."
+                read -rp "  Confirm? [Y/n]: " _pr_confirm
+                if [[ "${_pr_confirm,,}" == "n" ]]; then
+                    echo "  Cancelled."
+                    echo ""
+                    read -rp "  Press Enter to return to menu..." _pause
+                    return
+                fi
+                _new_paused="true"
+                _new_until="$_pr_date"
+                ;;
+            2)
+                echo ""
+                read -rp "  Pause indefinitely (use option ${MENU_PAUSE} to resume)? [Y/n]: " _pr_confirm
+                if [[ "${_pr_confirm,,}" == "n" ]]; then
+                    echo "  Cancelled."
+                    echo ""
+                    read -rp "  Press Enter to return to menu..." _pause
+                    return
+                fi
+                _new_paused="true"
+                _new_until=""
+                ;;
+            *)
+                echo "  Cancelled."
+                echo ""
+                read -rp "  Press Enter to return to menu..." _pause
+                return
+                ;;
+        esac
+    fi
+
+    # Atomically update only .paused / .paused_until in config.json
+    jq --argjson paused "$_new_paused" --arg until "$_new_until" \
+        '.paused = $paused | .paused_until = $until' \
+        "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" \
+        && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+
+    if [ "$_new_paused" = "true" ]; then
+        if [ -n "$_new_until" ]; then
+            log "⏸️  Scheduled plays paused (resumes $(date -d "$_new_until +1 day" +%Y-%m-%d 2>/dev/null || echo "after $_new_until"))."
+        else
+            log "⏸️  Scheduled plays paused indefinitely."
+        fi
+    else
+        log "▶️  Scheduled plays resumed."
+    fi
+
+    if [ -d "$VENV_DIR" ]; then
+        log "🗓️  Applying change to systemd timer units..."
+        maybe_sudo "$VENV_DIR/bin/python" "$INSTALL_DIR/schedule_sonos.py"
+    else
+        log "⚠️  Python venv not found. Run option ${MENU_INSTALL} (Install) to (re)create timers."
+    fi
+
+    echo ""
+    read -rp "  Press Enter to return to menu..." _pause
 }
 
 # ---------------------------------------------------------------------------
@@ -1738,6 +1919,9 @@ function prompt_menu() {
     get_sunset_header_line || true
     [ -n "$SUNSET_HEADER_LINE" ] && echo "$SUNSET_HEADER_LINE" || true
 
+    _pause_status
+    [ -n "$_PAUSE_DESC" ] && echo "  Pause:   $_PAUSE_DESC" || true
+
     if [ "$INSTALL_STATE" != "installed" ]; then
         echo ""
         echo "  ============================================"
@@ -1755,6 +1939,10 @@ function prompt_menu() {
     local _reconfig_label="Reconfigure (edit config.json interactively)"
     local _reload_label="Reload config (apply config.json changes)"
     local _manage_label="Manage scheduled plays (add / edit / remove)"
+    local _pause_label="Pause scheduled plays (vacation mode)"
+    if [ "$_PAUSE_FLAG" = "true" ]; then
+        _pause_label="Resume scheduled plays"
+    fi
     local _volume_label="Manage volume (global default + per-speaker overrides)"
 
     if [ "$INSTALL_STATE" = "none" ] || [ "$INSTALL_STATE" = "partial_no_venv" ]; then
@@ -1766,6 +1954,7 @@ function prompt_menu() {
         _upgrade_label="Upgrade (update scripts, keep config)  (requires install)"
         _reload_label="Reload config (apply config.json changes)  (requires install)"
         _manage_label="Manage scheduled plays (add / edit / remove)  (requires install)"
+        _pause_label="Pause / Resume scheduled plays  (requires install)"
     fi
 
     if [ "$INSTALL_STATE" = "none" ]; then
@@ -1786,14 +1975,15 @@ function prompt_menu() {
     echo "  7) $_reconfig_label"
     echo "  8) $_reload_label"
     echo "  9) $_manage_label"
-    echo "  10) $_volume_label"
+    echo "  10) $_pause_label"
+    echo "  11) $_volume_label"
     echo ""
     echo "  ── Danger zone ────────────────────────"
-    echo "  11) Uninstall completely"
+    echo "  12) Uninstall completely"
     echo ""
-    echo "  12) Exit without doing anything"
+    echo "  13) Exit without doing anything"
     echo ""
-    read -rp "Enter your choice [1-12]: " CHOICE
+    read -rp "Enter your choice [1-13]: " CHOICE
 }
 
 # ---------------------------------------------------------------------------
@@ -2498,6 +2688,10 @@ while true; do
         "$MENU_MANAGE")
             _require_install || continue
             manage_scheduled_plays
+            ;;
+        "$MENU_PAUSE")
+            _require_install || continue
+            pause_resume_plays
             ;;
         "$MENU_VOLUME")
             if [ "$INSTALL_STATE" = "none" ]; then
