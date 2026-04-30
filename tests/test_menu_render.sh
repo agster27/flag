@@ -2,8 +2,8 @@
 # tests/test_menu_render.sh — Smoke test for setup.sh menu structure.
 #
 # Static checks that catch the regression class behind PR #67:
-#   - The main menu has exactly 11 numbered options, in order 1..11.
-#   - The MENU_* constants are sequential 1..11 and dispatched in the case loop.
+#   - The main menu has exactly 12 numbered options, in order 1..12.
+#   - The MENU_* constants are sequential 1..12 and dispatched in the case loop.
 #   - No cron-backend identifiers leaked back into setup.sh.
 #   - setup.sh parses with `bash -n`.
 #
@@ -39,48 +39,48 @@ if [[ -z "$menu_body" ]]; then
     exit 1
 fi
 
-# 1. Exactly 11 numbered options inside prompt_menu
+# 1. Exactly 12 numbered options inside prompt_menu
 option_count=$(printf '%s\n' "$menu_body" \
     | grep -cE '^[[:space:]]+echo[[:space:]]+"[[:space:]]+[0-9]+\)' || true)
-if [[ "$option_count" == "11" ]]; then
-    pass "Menu has 11 numbered options"
+if [[ "$option_count" == "12" ]]; then
+    pass "Menu has 12 numbered options"
 else
     fail "Menu has $option_count numbered options (expected 11)"
 fi
 
-# 2. Numbers are 1..11 in order
+# 2. Numbers are 1..12 in order
 nums=$(printf '%s\n' "$menu_body" \
     | grep -oE '"[[:space:]]+[0-9]+\)' \
     | grep -oE '[0-9]+')
-expected_nums=$(seq 1 11)
+expected_nums=$(seq 1 12)
 if [[ "$nums" == "$expected_nums" ]]; then
-    pass "Options numbered 1..11 in order"
+    pass "Options numbered 1..12 in order"
 else
-    fail "Numbering wrong: got '$(echo "$nums" | tr '\n' ' ')', expected 1..11"
+    fail "Numbering wrong: got '$(echo "$nums" | tr '\n' ' ')', expected 1..12"
 fi
 
-# 3. Final read prompt advertises [1-11]
-if grep -qE 'Enter your choice \[1-11\]' "$SETUP_SH"; then
-    pass "Final read prompt is [1-11]"
+# 3. Final read prompt advertises [1-12]
+if grep -qE 'Enter your choice \[1-12\]' "$SETUP_SH"; then
+    pass "Final read prompt is [1-12]"
 else
-    fail "Final read prompt does not say [1-11]"
+    fail "Final read prompt does not say [1-12]"
 fi
 
-# 4. MENU_* constants: sequential 1..11, no MENU_BACKEND
+# 4. MENU_* constants: sequential 1..12, no MENU_BACKEND
 constants=$(grep -E '^readonly MENU_[A-Z]+=[0-9]+$' "$SETUP_SH")
 const_count=$(printf '%s\n' "$constants" | wc -l | tr -d ' ')
-if [[ "$const_count" == "11" ]]; then
-    pass "11 MENU_* constants defined"
+if [[ "$const_count" == "12" ]]; then
+    pass "12 MENU_* constants defined"
 else
-    fail "$const_count MENU_* constants defined (expected 11)"
+    fail "$const_count MENU_* constants defined (expected 12)"
 fi
 
 const_values=$(printf '%s\n' "$constants" | grep -oE '=[0-9]+$' | tr -d '=' | sort -n)
-expected_values=$(seq 1 11)
+expected_values=$(seq 1 12)
 if [[ "$const_values" == "$expected_values" ]]; then
-    pass "MENU_* values are 1..11"
+    pass "MENU_* values are 1..12"
 else
-    fail "MENU_* values not 1..11: got '$(echo "$const_values" | tr '\n' ' ')'"
+    fail "MENU_* values not 1..12: got '$(echo "$const_values" | tr '\n' ' ')'"
 fi
 
 if grep -qE '^readonly MENU_BACKEND=' "$SETUP_SH"; then
