@@ -1000,6 +1000,12 @@ function list_scheduled_plays() {
     # Displays a formatted table of all configured schedules (name, audio file,
     # time), the status of active systemd flag-*.timers, and whether the audio
     # HTTP server (flag-audio-http) is running, installed-but-stopped, or absent.
+    #
+    # Sunset-based timers use a static OnCalendar=03:00 wake-up and then sleep
+    # until the actual sunset time, so the raw `systemctl list-timers` output
+    # is misleading.  We resolve today's sunset time(s) via the venv and use
+    # them to (a) annotate the TIME column for sunset entries and (b) print a
+    # footnote mapping each sunset timer to its real play time.
     echo ""
     echo "============================================"
     echo "  Scheduled Plays                           "
@@ -1014,18 +1020,74 @@ function list_scheduled_plays() {
         return
     fi
 
+    # Resolve today's sunset-based play times.  Output is one TSV record per
+    # sunset schedule entry: "<config-name>\t<sanitised-unit-name>\t<HH:MM-or-ERROR:msg>".
+    # An empty string means resolution was unavailable (e.g. venv not installed).
+    local _sunset_resolved=""
+    if [ -d "$VENV_DIR" ] && [ -f "$INSTALL_DIR/schedule_sonos.py" ]; then
+        _sunset_resolved=$(FLAG_CONFIG="$CONFIG_FILE" FLAG_INSTALL_DIR="$INSTALL_DIR" \
+            "$VENV_DIR/bin/python" - <<'PYEOF' 2>/dev/null
+import json, os, sys
+sys.path.insert(0, os.environ.get("FLAG_INSTALL_DIR", "/opt/flag"))
+try:
+    from schedule_sonos import (
+        get_sunset_local_time,
+        get_sunset_local_time_with_offset,
+        parse_sunset_offset,
+        sanitise_name,
+    )
+except Exception:
+    sys.exit(0)
+
+try:
+    with open(os.environ.get("FLAG_CONFIG", "/opt/flag/config.json")) as f:
+        config = json.load(f)
+except Exception:
+    sys.exit(0)
+
+for entry in config.get("schedules", []) or []:
+    name = entry.get("name") or ""
+    t = entry.get("time") or ""
+    if not name or not isinstance(t, str):
+        continue
+    try:
+        offset = parse_sunset_offset(t)
+        if offset is not None:
+            h, m = get_sunset_local_time_with_offset(config, offset)
+        elif t.lower() == "sunset":
+            h, m = get_sunset_local_time(config)
+        else:
+            continue
+        resolved = f"{h:02d}:{m:02d}"
+    except Exception as e:
+        resolved = f"ERROR: {e}"
+    try:
+        unit = sanitise_name(name)
+    except Exception:
+        unit = name
+    print(f"{name}\t{unit}\t{resolved}")
+PYEOF
+)
+    fi
+
     SCHEDULE_COUNT=$(jq '.schedules | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
     if [ "$SCHEDULE_COUNT" -eq 0 ]; then
         echo "  ⚠️  No schedules configured in config.json."
     else
-        printf "  %-20s %-35s %-10s\n" "NAME" "AUDIO FILE" "TIME"
-        printf "  %-20s %-35s %-10s\n" "--------------------" "-----------------------------------" "----------"
+        printf "  %-20s %-35s %-22s\n" "NAME" "AUDIO FILE" "TIME"
+        printf "  %-20s %-35s %-22s\n" "--------------------" "-----------------------------------" "----------------------"
         for i in $(seq 0 $((SCHEDULE_COUNT - 1))); do
             _name=$(jq -r ".schedules[$i].name // \"(unnamed)\"" "$CONFIG_FILE")
             _url=$(jq -r ".schedules[$i].audio_url // \"(none)\"" "$CONFIG_FILE")
             _time=$(jq -r ".schedules[$i].time // \"(none)\"" "$CONFIG_FILE")
             _file=$(basename "$_url")
-            printf "  %-20s %-35s %-10s\n" "$_name" "$_file" "$_time"
+            if [[ "$_time" == sunset* ]] && [ -n "$_sunset_resolved" ]; then
+                _resolved=$(printf '%s\n' "$_sunset_resolved" | awk -F'\t' -v n="$_name" '$1==n {print $3; exit}')
+                if [[ -n "$_resolved" && "$_resolved" != ERROR:* ]]; then
+                    _time="$_time (≈$_resolved)"
+                fi
+            fi
+            printf "  %-20s %-35s %-22s\n" "$_name" "$_file" "$_time"
         done
     fi
 
@@ -1035,6 +1097,26 @@ function list_scheduled_plays() {
     _timer_output=$(systemctl list-timers --all 2>/dev/null || true)
     if echo "$_timer_output" | grep -q "flag"; then
         echo "$_timer_output" | grep -E "(NEXT|flag)" | sed 's/^/  /'
+        # Sunset timers fire at a static 03:00 and then sleep until sunset, so
+        # the NEXT column above is misleading.  Print the real play times.
+        if [ -n "$_sunset_resolved" ]; then
+            local _printed_header="false"
+            while IFS=$'\t' read -r _cfg_name _unit_name _resolved; do
+                [ -z "$_cfg_name" ] && continue
+                if [ "$_printed_header" = "false" ]; then
+                    echo ""
+                    echo "  Note: sunset timers wake at 03:00 then sleep until sunset."
+                    echo "  Today's resolved sunset play times:"
+                    _printed_header="true"
+                fi
+                if [[ "$_resolved" == ERROR:* ]]; then
+                    printf "    • flag-%s.timer → could not resolve sunset (%s)\n" \
+                        "$_unit_name" "${_resolved#ERROR: }"
+                else
+                    printf "    • flag-%s.timer → %s\n" "$_unit_name" "$_resolved"
+                fi
+            done <<< "$_sunset_resolved"
+        fi
     else
         echo "  (no flag timers found — run Install or Reconfigure to create them)"
     fi
